@@ -6,7 +6,7 @@ syscall_address = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_ad
 
 
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules 
+	@make -C /lib/modules/$(shell uname -r)/build M=$(PWD) V=1 modules > output.log 2>&1
 
 clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean

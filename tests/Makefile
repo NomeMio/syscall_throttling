@@ -1,5 +1,5 @@
 obj-m += test_module.o
-test_module-objs += test.o 
+test_module-objs += test.o lib/scth.o
 
 syscall_address = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)
 
