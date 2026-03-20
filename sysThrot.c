@@ -229,7 +229,8 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
         case sysThrot_IOC_DEREGISTER_PROGRAM:
             return sysThrot_deregister_program((TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM)arg);
         case sysThrot_IOC_REGISTER_SYSCALL:
-            int syscall_id = copy_from_user(&syscall_id, (TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL *)arg, sizeof(syscall_id));
+            int syscall_id ;
+            copy_from_user(&syscall_id, (TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL *)arg, sizeof(syscall_id));
             return sysThrot_register_syscall(syscall_id);
         case sysThrot_IOC_DEREGISTER_SYSCALL:
             return sysThrot_deregister_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL)arg);
