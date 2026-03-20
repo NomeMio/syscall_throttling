@@ -54,21 +54,7 @@ int test_init(void) {
     printk("%s: initializing\n",MODNAME);
 	
 
-    if (sys_call_table_address == 0x0) {
-        printk("%s: sys_call_table_address parameter not set\n",MODNAME);
-        return -EINVAL;
-    } else {
-        printk("%s: sys_call_table_address parameter set to 0x%lx\n",MODNAME,sys_call_table_address);
-    }
-
-
-
-
-
-    unprotect_memory();
-    sys_call_fork_address = ((unsigned long *)sys_call_table_address)[SYS_TO_REMOVE];
-    ((unsigned long *)sys_call_table_address)[SYS_TO_REMOVE] = (unsigned long)sys_print;
-    protect_memory();
+   
     printk("%s: module correctly mounted\n",MODNAME);
 
     return 0;
@@ -78,10 +64,20 @@ int test_init(void) {
 
 void test_cleanup(void) {
 
-    unprotect_memory();
-    ((unsigned long *)sys_call_table_address)[SYS_TO_REMOVE] = sys_call_fork_address;
-    protect_memory();
+    static struct kprobe kp_x64_sys_call = { .symbol_name = "x64_sys_call" };
+    if (register_kprobe(&kp_x64_sys_call)) {
+                printk(KERN_ERR "%s: cannot register kprobe for x64_sys_call\n", MODNAME);
+                return -1;
+        }
 
+        x64_sys_call_addr = (unsigned long)kp_x64_sys_call.addr;
+        unregister_kprobe(&kp_x64_sys_call);
+
+        /* JMP opcode */
+        jump_inst[0] = 0xE9;
+        /* RIP points to the next instruction. Current instruction has length 5 */
+        offset = (unsigned long)call - x64_sys_call_addr - INST_LEN;
+        memcpy(jump_inst + 1, &offset, sizeof(int));
 
     printk("%s: shutting down\n",MODNAME);
         

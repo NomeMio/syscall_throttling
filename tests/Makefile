@@ -1,7 +1,7 @@
 obj-m += test_module.o
 test_module-objs += test.o lib/scth.o
 
-syscall_address = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)
+#syscall_address = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)
 
 
 
@@ -12,7 +12,7 @@ clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 
 load:
-	insmod test_module.ko sys_call_table_address=$(syscall_address)
+	insmod test_module.ko 
 
 remove:
 	rmmod test_module 
