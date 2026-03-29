@@ -14,14 +14,71 @@
 #include <linux/interrupt.h>
 #include <linux/time.h>
 #include <linux/string.h>
+#include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 #include <asm/page.h>
 #include <asm/cacheflush.h>
 #include <asm/apic.h>
 #include <linux/syscalls.h>
 #include <linux/ftrace.h>
+#include <linux/delay.h>
+#include <linux/cred.h>
 //#include "./include/vtpmo.h"
 #include "./sysThrot.h"
+
+unsigned long cr0, cr4;
+
+static inline void write_cr0_forced(unsigned long val){
+        unsigned long __force_order;
+        asm volatile("mov %0, %%cr0" : "+r"(val), "+m"(__force_order));
+}
+static inline void protect_memory(void){
+        write_cr0_forced(cr0);
+}
+
+static inline void unprotect_memory(void){
+        write_cr0_forced(cr0 & ~X86_CR0_WP);
+}
+
+static inline void write_cr4_forced(unsigned long val){
+        unsigned long __force_order;
+        asm volatile("mov %0, %%cr4" : "+r"(val), "+m"(__force_order));
+}
+
+static inline void conditional_cet_disable(void){
+#ifdef X86_CR4_CET
+        if (cr4 & X86_CR4_CET)
+                write_cr4_forced(cr4 & ~X86_CR4_CET);
+#endif
+}
+
+static inline void conditional_cet_enable(void){
+#ifdef X86_CR4_CET
+        if (cr4 & X86_CR4_CET)
+                write_cr4_forced(cr4);
+#endif
+}
+
+static inline void being_sys_call_hacking(void){
+        preempt_disable();
+        cr0 = read_cr0();
+        cr4 = native_read_cr4();
+        conditional_cet_disable();
+        unprotect_memory();
+}
+
+static inline void end_sys_call_hacking(void){
+        protect_memory();
+        conditional_cet_enable();
+        preempt_enable();
+}
+
+
+
+
+
+
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nessuno");
@@ -37,6 +94,9 @@ unsigned long max_calls_monitor = 0;
 module_param(max_calls_monitor, ulong, 0660);
 
 
+unsigned long counter=0;
+
+module_param(counter, ulong, 0660);
 
 
 //Device driver stuff
@@ -60,7 +120,6 @@ struct generic_list {
     const char *name;
 };
 
-
 struct sysThrot_driver
 {
     int active_calls;
@@ -79,8 +138,94 @@ struct sysThrot_driver sysThrot_dev = {
 };
 
 
+
 static struct generic_list user_list = {.head = NULL, .data_size = sizeof(TYPE_OF_DATA_PASSED_TO_IOCTL_USER), .name = "user"};
 static struct generic_list program_list = {.head = NULL, .data_size = sizeof(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM), .name = "program"};
+
+static int program_list_find_locked(const char *program_name)
+{
+    struct generic_list_node *node = program_list.head;
+
+    while (node) {
+        if (!strcmp((const char *)node->data, program_name))
+            return 1;
+        node = node->next;
+    }
+
+    return 0;
+}
+
+static int program_list_add_from_user(const char __user *user_program_name)
+{
+    struct generic_list_node *new_node;
+    char *program_name;
+    //TODO DA METTERE QUALCHE MACRO PER LA SIZE
+    program_name=kmalloc(256, GFP_KERNEL);
+    int result = strncpy_from_user(program_name, user_program_name, 256);
+    if (result < 0) {
+        kfree(program_name);
+        printk("%s: Failed to copy program name from user (err=%d)\n", MODNAME, result);
+        return -1;
+    }
+    mutex_lock(&program_list.lock);
+    if (program_list_find_locked(program_name)) {
+        mutex_unlock(&program_list.lock);
+        kfree(program_name);
+        return -EEXIST;
+    }
+
+    new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+    if (!new_node) {
+        mutex_unlock(&program_list.lock);
+        kfree(program_name);
+        return -ENOMEM;
+    }
+
+    new_node->data = program_name;
+    new_node->next = program_list.head;
+    program_list.head = new_node;
+    mutex_unlock(&program_list.lock);
+
+    return 0;
+}
+
+static int program_list_remove_from_user(const char __user *user_program_name)
+{
+    struct generic_list_node *node;
+    struct generic_list_node *prev = NULL;
+    char *program_name;
+
+    program_name=kmalloc(256, GFP_KERNEL);
+    int result = strncpy_from_user(program_name, user_program_name, 256);
+    if (result < 0) {
+        kfree(program_name);
+        printk("%s: Failed to copy program name from user (err=%d)\n", MODNAME, result);
+        return -1;
+    }
+
+    mutex_lock(&program_list.lock);
+    node = program_list.head;
+
+    while (node) {
+        if (!strcmp((const char *)node->data, program_name)) {
+            if (prev)
+                prev->next = node->next;
+            else
+                program_list.head = node->next;
+            kfree(node->data);
+            kfree(node);
+            mutex_unlock(&program_list.lock);
+            kfree(program_name);
+            return 0;
+        }
+        prev = node;
+        node = node->next;
+    }
+
+    mutex_unlock(&program_list.lock);
+    kfree(program_name);
+    return -ENOENT;
+}
 
 static int generic_list_find_locked(struct generic_list *list, const void *value)
 {
@@ -170,6 +315,22 @@ static void generic_list_destroy(struct generic_list *list)
     mutex_destroy(&list->lock);
 }
 
+
+void print_program_list(void){
+    struct generic_list_node *node;
+    mutex_lock(&program_list.lock);
+    node = program_list.head;
+    printk("%s: Registered programs:\n", MODNAME);
+    while (node) {
+        printk("%s\n", (char *)node->data);
+        node = node->next;
+    }
+    mutex_unlock(&program_list.lock);
+}
+
+
+
+
 int device_driver_init(void){
     dev_t dev;
     int result;
@@ -219,6 +380,7 @@ int device_driver_cleanup(void){
 }
 
 long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
+    int syscall_id ;
     switch(cmd) {
         case sysThrot_IOC_REGISTER_USER:
             return sysThrot_register_user((TYPE_OF_DATA_PASSED_TO_IOCTL_USER)arg);
@@ -229,11 +391,11 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
         case sysThrot_IOC_DEREGISTER_PROGRAM:
             return sysThrot_deregister_program((TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM)arg);
         case sysThrot_IOC_REGISTER_SYSCALL:
-            int syscall_id ;
             copy_from_user(&syscall_id, (TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL *)arg, sizeof(syscall_id));
             return sysThrot_register_syscall(syscall_id);
         case sysThrot_IOC_DEREGISTER_SYSCALL:
-            return sysThrot_deregister_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL)arg);
+            copy_from_user(&syscall_id, (TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL *)arg, sizeof(syscall_id));
+            return sysThrot_deregister_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL)syscall_id);
         default:
             printk("%s: Invalid ioctl command\n", MODNAME);
             return -EINVAL;
@@ -263,25 +425,24 @@ int sysThrot_deregister_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
 
     return ret;
 }
-int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id){
-    int ret = generic_list_add(&program_list, &program_id);
+int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name){
+    int ret = program_list_add_from_user((const char __user *)program_name);
 
     if (!ret)
-        printk("%s: Registered program with ID %d\n", MODNAME, program_id);
+        printk("%s: Registered program\n", MODNAME);
     else if (ret == -EEXIST)
-        printk("%s: Program with ID %d is already registered\n", MODNAME, program_id);
+        printk("%s: Program is already registered\n", MODNAME);
     else
-        printk("%s: Failed to register program with ID %d (err=%d)\n", MODNAME, program_id, ret);
-
+        printk("%s: Failed to register program (err=%d)\n", MODNAME, ret);
     return ret;
 }
-int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id){
-    int ret = generic_list_remove(&program_list, &program_id);
+int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name){
+    int ret = program_list_remove_from_user((const char __user *)program_name);
 
     if (!ret)
-        printk("%s: Deregistered program with ID %d\n", MODNAME, program_id);
+        printk("%s: Deregistered program\n", MODNAME);
     else
-        printk("%s: Program with ID %d not registered\n", MODNAME, program_id);
+        printk("%s: Program not registered\n", MODNAME);
 
     return ret;
 }
@@ -290,12 +451,40 @@ int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id)
 
 // TODO: per implementarla realmente a run time non so come fare
 static const char *  syscall_symbols[]  = {
-    "x64_sys_read",
-    "x64_sys_write",
-    "x64_sys_open", 
-    "x64_sys_close",
-    "x64_sys_stat"
+    "__x64_sys_read",
+    "__x64_sys_write",
+    "__x64_sys_open", 
+    "__x64_sys_close",
+    "__x64_sys_stat"
 };
+
+
+void temp(struct pt_regs *regs) {
+    struct task_struct *task = current;
+    if (program_list_find_locked(task->comm)) {
+       msleep(4000);
+    }
+}
+
+asm(
+".global my_stub\n"
+"my_stub:\n"
+"    pushq %rax\n" // Save all registers that the syscall needs
+"    pushq %rdi\n"
+"    pushq %rsi\n"
+"    pushq %rdx\n"
+"    pushq %rcx\n"
+"    pushq %r11\n"
+"    call temp\n"  // Call your C function
+"    popq %r11\n"  // Restore everything exactly as it was
+"    popq %rcx\n"
+"    popq %rdx\n"
+"    popq %rsi\n"
+"    popq %rdi\n"
+"    popq %rax\n"
+"    ret\n"        // Return to the instruction AFTER your injected CALL
+);
+extern void my_stub(void);
 int installProbe(int syscall_id){
     static struct kprobe kp;
     printk("%s: Installing kprobe for syscall (ID %d)\n", MODNAME, syscall_id);
@@ -304,16 +493,84 @@ int installProbe(int syscall_id){
         return -EINVAL;
 
     kp.symbol_name = syscall_symbols[syscall_id];
+   
+    if (sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8))) {
+        printk("%s: Syscall (ID %d) is already registered\n", MODNAME, syscall_id);
+        return -EEXIST;
+    }
+
+     int result = register_kprobe(&kp);
+    if (result) {
+        printk("%s: Failed to register kprobe for syscall (ID %d), with error %d\n", MODNAME, syscall_id,result);
+        return result;
+    }  
+    //sarebbe da sistemare per poi metterlo apposto
+    unsigned long addr_sys = (unsigned long)kp.addr;
+    unregister_kprobe(&kp);
+    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+    int INTS_LEN=5;
+    char call_instruction[INTS_LEN];
+    call_instruction[0]=0xE8; // opcode for CALL rel32
+    int offset = (unsigned long)my_stub - addr_sys - INTS_LEN;
+    memcpy(call_instruction + 1, &offset, sizeof(int));
+    being_sys_call_hacking();
+    memcpy((void *)addr_sys, call_instruction, INTS_LEN);
+    end_sys_call_hacking();
+    sysThrot_dev.syscall_presence_bitmap[syscall_id/8] |= (1 << (syscall_id % 8));
     return 1;
 }
 
 
+
+int removeProbe(int syscall_id){
+    static struct kprobe kp;
+
+    if (syscall_id < 0 || syscall_id >= ARRAY_SIZE(syscall_symbols))
+        return -EINVAL; 
+    if( sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8))==0 )
+            return -EINVAL; 
+    kp.symbol_name = syscall_symbols[syscall_id];
+    int result = register_kprobe(&kp);
+    if (result) {
+        printk("%s: Failed to register kprobe for syscall (ID %d), with error %d\n", MODNAME, syscall_id,result);
+        return -1;
+    }   
+    //sarebbe da sistemare per poi metterlo apposto
+    unsigned long addr_sys = (unsigned long)kp.addr;
+    unregister_kprobe(&kp);
+    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+    int INTS_LEN=5;
+    char call_instruction[INTS_LEN];
+    call_instruction[0]=0x90;
+    call_instruction[1]=0x90;
+    call_instruction[2]=0x90;
+    call_instruction[3]=0x90;
+    call_instruction[4]=0x90;
+    being_sys_call_hacking();
+    memcpy((void *)addr_sys, call_instruction, INTS_LEN);
+    end_sys_call_hacking();
+    sysThrot_dev.syscall_presence_bitmap[syscall_id/8] &= ~(1 << (syscall_id % 8));
+    return 1;
+}   
 int sysThrot_register_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id){
+    int user=current_uid().val;
+    struct task_struct *task = current;
+    printk("%s: Current process is %s (PID %d)\n", MODNAME, task->comm, task->pid);
+    int outcome=program_list_find_locked(task->comm);
+    if (outcome)
+        printk("%s: Current process is registered for syscall throttling\n", MODNAME);
+    printk("%s: User with ID %d requests to register syscall with ID %d\n,", MODNAME, user, syscall_id);
     installProbe(syscall_id);
     return 1;
 }
 int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id){
-    
+        int user=current_uid().val;
+    if(removeProbe(syscall_id)<0){
+        printk("%s: User with ID %d failed to deregister syscall with ID %d\n,", MODNAME, user, syscall_id);
+        return -EINVAL;
+    };
+    printk("%s: User with ID %d is deregistering syscall with ID %d\n,", MODNAME, user, syscall_id);
+
     return 1;
 }
 
