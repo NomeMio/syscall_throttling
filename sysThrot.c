@@ -26,53 +26,6 @@
 //#include "./include/vtpmo.h"
 #include "./sysThrot.h"
 
-unsigned long cr0, cr4;
-
-static inline void write_cr0_forced(unsigned long val){
-        unsigned long __force_order;
-        asm volatile("mov %0, %%cr0" : "+r"(val), "+m"(__force_order));
-}
-static inline void protect_memory(void){
-        write_cr0_forced(cr0);
-}
-
-static inline void unprotect_memory(void){
-        write_cr0_forced(cr0 & ~X86_CR0_WP);
-}
-
-static inline void write_cr4_forced(unsigned long val){
-        unsigned long __force_order;
-        asm volatile("mov %0, %%cr4" : "+r"(val), "+m"(__force_order));
-}
-
-static inline void conditional_cet_disable(void){
-#ifdef X86_CR4_CET
-        if (cr4 & X86_CR4_CET)
-                write_cr4_forced(cr4 & ~X86_CR4_CET);
-#endif
-}
-
-static inline void conditional_cet_enable(void){
-#ifdef X86_CR4_CET
-        if (cr4 & X86_CR4_CET)
-                write_cr4_forced(cr4);
-#endif
-}
-
-static inline void being_sys_call_hacking(void){
-        preempt_disable();
-        cr0 = read_cr0();
-        cr4 = native_read_cr4();
-        conditional_cet_disable();
-        unprotect_memory();
-}
-
-static inline void end_sys_call_hacking(void){
-        protect_memory();
-        conditional_cet_enable();
-        preempt_enable();
-}
-
 
 
 
@@ -108,18 +61,6 @@ const struct file_operations fops = {
 };
 
 
-struct generic_list_node {
-    void *data;
-    struct generic_list_node *next;
-};
-
-struct generic_list {
-    struct generic_list_node *head;
-    size_t data_size;
-    struct mutex lock;
-    const char *name;
-};
-
 struct sysThrot_driver
 {
     int active_calls;
@@ -139,194 +80,8 @@ struct sysThrot_driver sysThrot_dev = {
 
 
 
-static struct generic_list user_list = {.head = NULL, .data_size = sizeof(TYPE_OF_DATA_PASSED_TO_IOCTL_USER), .name = "user"};
-static struct generic_list program_list = {.head = NULL, .data_size = sizeof(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM), .name = "program"};
-
-static int program_list_find_locked(const char *program_name)
-{
-    struct generic_list_node *node = program_list.head;
-
-    while (node) {
-        if (!strcmp((const char *)node->data, program_name))
-            return 1;
-        node = node->next;
-    }
-
-    return 0;
-}
-
-static int program_list_add_from_user(const char __user *user_program_name)
-{
-    struct generic_list_node *new_node;
-    char *program_name;
-    //TODO DA METTERE QUALCHE MACRO PER LA SIZE
-    program_name=kmalloc(256, GFP_KERNEL);
-    int result = strncpy_from_user(program_name, user_program_name, 256);
-    if (result < 0) {
-        kfree(program_name);
-        printk("%s: Failed to copy program name from user (err=%d)\n", MODNAME, result);
-        return -1;
-    }
-    mutex_lock(&program_list.lock);
-    if (program_list_find_locked(program_name)) {
-        mutex_unlock(&program_list.lock);
-        kfree(program_name);
-        return -EEXIST;
-    }
-
-    new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
-    if (!new_node) {
-        mutex_unlock(&program_list.lock);
-        kfree(program_name);
-        return -ENOMEM;
-    }
-
-    new_node->data = program_name;
-    new_node->next = program_list.head;
-    program_list.head = new_node;
-    mutex_unlock(&program_list.lock);
-
-    return 0;
-}
-
-static int program_list_remove_from_user(const char __user *user_program_name)
-{
-    struct generic_list_node *node;
-    struct generic_list_node *prev = NULL;
-    char *program_name;
-
-    program_name=kmalloc(256, GFP_KERNEL);
-    int result = strncpy_from_user(program_name, user_program_name, 256);
-    if (result < 0) {
-        kfree(program_name);
-        printk("%s: Failed to copy program name from user (err=%d)\n", MODNAME, result);
-        return -1;
-    }
-
-    mutex_lock(&program_list.lock);
-    node = program_list.head;
-
-    while (node) {
-        if (!strcmp((const char *)node->data, program_name)) {
-            if (prev)
-                prev->next = node->next;
-            else
-                program_list.head = node->next;
-            kfree(node->data);
-            kfree(node);
-            mutex_unlock(&program_list.lock);
-            kfree(program_name);
-            return 0;
-        }
-        prev = node;
-        node = node->next;
-    }
-
-    mutex_unlock(&program_list.lock);
-    kfree(program_name);
-    return -ENOENT;
-}
-
-static int generic_list_find_locked(struct generic_list *list, const void *value)
-{
-    struct generic_list_node *node = list->head;
-
-    while (node) {
-        if (!memcmp(node->data, value, list->data_size))
-            return 1;
-        node = node->next;
-    }
-
-    return 0;
-}
-
-static int generic_list_add(struct generic_list *list, const void *value)
-{
-    struct generic_list_node *new_node;
-
-    mutex_lock(&list->lock);
-    if (generic_list_find_locked(list, value)) {
-        mutex_unlock(&list->lock);
-        return -EEXIST;
-    }
-
-    new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
-    if (!new_node) {
-        mutex_unlock(&list->lock);
-        return -ENOMEM;
-    }
-
-    new_node->data = kmalloc(list->data_size, GFP_KERNEL);
-    if (!new_node->data) {
-        kfree(new_node);
-        mutex_unlock(&list->lock);
-        return -ENOMEM;
-    }
-
-    memcpy(new_node->data, value, list->data_size);
-    new_node->next = list->head;
-    list->head = new_node;
-    mutex_unlock(&list->lock);
-
-    return 0;
-}
-
-static int generic_list_remove(struct generic_list *list, const void *value)
-{
-    struct generic_list_node *node;
-    struct generic_list_node *prev = NULL;
-
-    mutex_lock(&list->lock);
-    node = list->head;
-
-    while (node) {
-        if (!memcmp(node->data, value, list->data_size)) {
-            if (prev)
-                prev->next = node->next;
-            else
-                list->head = node->next;
-            kfree(node->data);
-            kfree(node);
-            mutex_unlock(&list->lock);
-            return 0;
-        }
-        prev = node;
-        node = node->next;
-    }
-
-    mutex_unlock(&list->lock);
-    return -ENOENT;
-}
-
-static void generic_list_destroy(struct generic_list *list)
-{
-    struct generic_list_node *node;
-
-    mutex_lock(&list->lock);
-    node = list->head;
-    while (node) {
-        struct generic_list_node *next = node->next;
-        kfree(node->data);
-        kfree(node);
-        node = next;
-    }
-    list->head = NULL;
-    mutex_unlock(&list->lock);
-    mutex_destroy(&list->lock);
-}
 
 
-void print_program_list(void){
-    struct generic_list_node *node;
-    mutex_lock(&program_list.lock);
-    node = program_list.head;
-    printk("%s: Registered programs:\n", MODNAME);
-    while (node) {
-        printk("%s\n", (char *)node->data);
-        node = node->next;
-    }
-    mutex_unlock(&program_list.lock);
-}
 
 
 
@@ -335,8 +90,7 @@ int device_driver_init(void){
     dev_t dev;
     int result;
 
-    mutex_init(&user_list.lock);
-    mutex_init(&program_list.lock);
+    init_lists();
 
     result=alloc_chrdev_region(&dev, minor_number, 1, DEVICE_NAME);
     major_number=MAJOR(dev);
@@ -370,8 +124,7 @@ int device_driver_init(void){
 
 
 int device_driver_cleanup(void){
-    generic_list_destroy(&user_list);
-    generic_list_destroy(&program_list);
+    destroy_lists();
     cdev_del(&sysThrot_dev.cdev);
     device_destroy(sysThrot_dev.device_class, MKDEV(major_number, minor_number));
     class_destroy(sysThrot_dev.device_class);
@@ -404,7 +157,7 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
 
 
 int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
-    int ret = generic_list_add(&user_list, &user_id);
+    int ret = user_list_add(user_id);
 
     if (!ret)
         printk("%s: Registered user with ID %d\n", MODNAME, user_id);
@@ -416,7 +169,7 @@ int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
     return ret;
 }
 int sysThrot_deregister_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
-    int ret = generic_list_remove(&user_list, &user_id);
+    int ret = user_list_remove(user_id);
 
     if (!ret)
         printk("%s: Deregistered user with ID %d\n", MODNAME, user_id);
@@ -426,7 +179,7 @@ int sysThrot_deregister_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
     return ret;
 }
 int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name){
-    int ret = program_list_add_from_user((const char __user *)program_name);
+    int ret = program_list_add((const char __user *)program_name);
 
     if (!ret)
         printk("%s: Registered program\n", MODNAME);
@@ -437,7 +190,7 @@ int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name)
     return ret;
 }
 int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name){
-    int ret = program_list_remove_from_user((const char __user *)program_name);
+    int ret = program_list_remove((const char __user *)program_name);
 
     if (!ret)
         printk("%s: Deregistered program\n", MODNAME);
@@ -461,7 +214,7 @@ static const char *  syscall_symbols[]  = {
 
 void temp(struct pt_regs *regs) {
     struct task_struct *task = current;
-    if (program_list_find_locked(task->comm)) {
+    if (program_list_find(task->comm)) {
        msleep(4000);
     }
 }
@@ -513,9 +266,10 @@ int installProbe(int syscall_id){
     call_instruction[0]=0xE8; // opcode for CALL rel32
     int offset = (unsigned long)my_stub - addr_sys - INTS_LEN;
     memcpy(call_instruction + 1, &offset, sizeof(int));
-    being_sys_call_hacking();
+    unsigned long cr0, cr4;
+    being_sys_call_hacking(&cr0, &cr4);
     memcpy((void *)addr_sys, call_instruction, INTS_LEN);
-    end_sys_call_hacking();
+    end_sys_call_hacking(cr0, cr4);
     sysThrot_dev.syscall_presence_bitmap[syscall_id/8] |= (1 << (syscall_id % 8));
     return 1;
 }
@@ -546,9 +300,10 @@ int removeProbe(int syscall_id){
     call_instruction[2]=0x90;
     call_instruction[3]=0x90;
     call_instruction[4]=0x90;
-    being_sys_call_hacking();
+    unsigned long cr0, cr4;
+    being_sys_call_hacking(&cr0, &cr4);
     memcpy((void *)addr_sys, call_instruction, INTS_LEN);
-    end_sys_call_hacking();
+    end_sys_call_hacking(cr0, cr4);
     sysThrot_dev.syscall_presence_bitmap[syscall_id/8] &= ~(1 << (syscall_id % 8));
     return 1;
 }   
@@ -556,7 +311,7 @@ int sysThrot_register_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id){
     int user=current_uid().val;
     struct task_struct *task = current;
     printk("%s: Current process is %s (PID %d)\n", MODNAME, task->comm, task->pid);
-    int outcome=program_list_find_locked(task->comm);
+    int outcome=program_list_find(task->comm);
     if (outcome)
         printk("%s: Current process is registered for syscall throttling\n", MODNAME);
     printk("%s: User with ID %d requests to register syscall with ID %d\n,", MODNAME, user, syscall_id);
