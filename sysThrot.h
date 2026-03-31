@@ -78,6 +78,7 @@ void init_lists(void);
 void destroy_lists(void);
 int user_list_add(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
 int user_list_remove(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
+int user_list_find(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
 int program_list_add(const char __user *user_program_name);
 int program_list_remove(const char __user *user_program_name);
 int program_list_find(const char *program_name);

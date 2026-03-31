@@ -227,6 +227,11 @@ int user_list_remove(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id)
     return generic_list_remove(&user_list, &user_id);
 }
 
+int user_list_find(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id)
+{
+    return generic_list_find_locked(&user_list, &user_id);
+}
+
 // Program list operations
 int program_list_add(const char __user *user_program_name)
 {
