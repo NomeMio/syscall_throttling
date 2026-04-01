@@ -3,9 +3,9 @@
 
 #define sysThrot_IOC_MAGIC '-'
 
-#define TYPE_OF_DATA_PASSED_TO_IOCTL_USER int
+#define TYPE_OF_DATA_PASSED_TO_IOCTL_USER int*
 #define TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM char *
-#define TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL int
+#define TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL int *
 
 #define sysThrot_IOC_REGISTER_USER _IOW(sysThrot_IOC_MAGIC, 1, TYPE_OF_DATA_PASSED_TO_IOCTL_USER)
 #define sysThrot_IOC_DEREGISTER_USER _IOW(sysThrot_IOC_MAGIC, 2, TYPE_OF_DATA_PASSED_TO_IOCTL_USER)
@@ -74,15 +74,16 @@ int sysThrot_register_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
 int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
 
 /* List Management Functions */
-void init_lists(void);
-void destroy_lists(void);
-int user_list_add(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
-int user_list_remove(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
-int user_list_find(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
-int program_list_add(const char __user *user_program_name);
-int program_list_remove(const char __user *user_program_name);
-int program_list_find(const char *program_name);
-void print_program_list(void);
 
+// Data Store for Module
 
-// list of syscalls symbols
+struct _sysThrot_Store;
+
+int init_sysThrot_store(struct _sysThrot_Store **store);
+int destroy_sysThrot_store(struct _sysThrot_Store *store);
+int add_user_to_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
+int remove_user_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
+int find_user_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
+int add_program_to_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
+int remove_program_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
+int find_program_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);

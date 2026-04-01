@@ -82,11 +82,13 @@ int main(int argc, char** argv){
 
 
 	register_program(program_name);
-	register_syscall(2); 
 	register_program(program_name1);
-	deregister_syscall(2); 
 	register_program(program_name2);
+	register_syscall(2); 
+	open("/dev/null", O_RDONLY);
 	register_syscall(3);
+	deregister_syscall(2); 
+
 	register_syscall(4);
 	deregister_syscall(3);
 	deregister_syscall(4);
