@@ -1,5 +1,11 @@
 #include <asm/apic.h>
 #include <linux/syscalls.h>
+#include <linux/device.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#define  AUDIT if(1)
+#define MODNAME "SYSTHROT"
+#define DEVICE_NAME "sysThrot_dev"
 
 #define sysThrot_IOC_MAGIC '-'
 
@@ -63,7 +69,39 @@ static inline void end_sys_call_hacking(unsigned long cr0, unsigned long cr4){
     preempt_enable();
 }
 
-/* IOCTL Operations */
+
+static inline void turnIrqOff(void){
+    local_irq_disable();
+}
+
+static inline void turnIrqOn(void){
+    local_irq_enable();
+}
+
+/* Driver structure and related definitions */
+#define SUPPORTED_SYSCALLS 333
+
+struct sysThrot_driver
+{   
+    struct _sysThrot_Store *store;
+    char syscall_presence_bitmap[__NR_syscalls/8+1];
+    int bitmap_size;
+    unsigned long syscall_addresses[SUPPORTED_SYSCALLS];
+    struct file_operations fops;
+    struct cdev cdev;
+    struct class *device_class;
+};
+
+/* Extern declarations for driver global variables */
+extern struct sysThrot_driver sysThrot_dev;
+extern int major_number;
+extern int minor_number;
+extern const struct file_operations fops;
+
+int device_driver_init(void);
+int device_driver_cleanup(void);
+
+
 long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 
 int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);

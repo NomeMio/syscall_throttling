@@ -1,5 +1,5 @@
 obj-m += sysThrot_module.o
-sysThrot_module-objs += sysThrot.o sysThrot_store.o 
+sysThrot_module-objs += sysThrot_store.o  sysThrot.o  sysThrot_ioctl.o 
 
 
 #syscall_address = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)

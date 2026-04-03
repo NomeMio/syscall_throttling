@@ -23,13 +23,13 @@
 #include <linux/ftrace.h>
 #include <linux/delay.h>
 #include <linux/cred.h>
+
 //#include "./include/vtpmo.h"
 #include "./sysThrot.h"
 
 
 
 
-#define  AUDIT if(1)
 
 #define SUPPORTED_SYSCALLS 333
 
@@ -41,20 +41,39 @@ MODULE_AUTHOR("Nessuno");
 MODULE_DESCRIPTION("Syscall Throttling Module");
 
 
-#define MODNAME "SYSTHROT"
 int major_number;
 int minor_number=0;
 
 unsigned long max_calls_monitor = 0;
 module_param(max_calls_monitor, ulong, 0660);
 
+/* Forward declarations for functions implemented in this translation unit. */
+int device_driver_init(void);
+int device_driver_cleanup(void);
+
+long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
+int sysThrot_deregister_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
+int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name);
+int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name);
+int sysThrot_register_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
+int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
+
+inline int check_if_registered(void);
+void temp(struct pt_regs *regs);
+int installProbe(int syscall_id);
+int removeProbe(int syscall_id);
+
+int sysThrot_init(void);
+void sysThrot_cleanup(void);
+
+extern void stub_trampoline(void);
 
 
 static const char *syscall_symbols[SUPPORTED_SYSCALLS];
 
 
 //Device driver stuff
-#define DEVICE_NAME "sysThrot_dev"
 
 const struct file_operations fops = {
     .owner = THIS_MODULE,
@@ -62,225 +81,39 @@ const struct file_operations fops = {
 };
 
 
-struct sysThrot_driver
-{   
-    struct _sysThrot_Store *store;
-    char syscall_presence_bitmap[__NR_syscalls/8+1];
-    int bitmap_size;
-    unsigned long syscall_addresses[SUPPORTED_SYSCALLS];
-    struct file_operations fops;
-    struct cdev cdev;
-    struct class *device_class;
-};
+
+
+
 
 struct sysThrot_driver sysThrot_dev = {
     .fops = fops,
-    .active_calls = 0,
     .bitmap_size=__NR_syscalls/8+1,
 };
 
 
 
-
-
-
-
-
-
-int device_driver_init(void){
-    dev_t dev;
-    int result;
-    result=alloc_chrdev_region(&dev, minor_number, 1, DEVICE_NAME);
-    major_number=MAJOR(dev);
-    if (result < 0) {
-        printk(KERN_ALERT "%s: Failed to allocate a major number\n", MODNAME);
-        return result;
-    }
-    sysThrot_dev.device_class=class_create(DEVICE_NAME);
-    if(IS_ERR(sysThrot_dev.device_class)){
-        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        printk(KERN_ALERT "%s: Failed to create device class\n", MODNAME);
-        return PTR_ERR(sysThrot_dev.device_class);
-    }
-    if(device_create(sysThrot_dev.device_class, NULL, MKDEV(major_number, minor_number), NULL, DEVICE_NAME) == NULL){
-        class_destroy(sysThrot_dev.device_class);
-        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        printk(KERN_ALERT "%s: Failed to create device\n", MODNAME);
-        return -1;
-    }
-    cdev_init(&sysThrot_dev.cdev, &sysThrot_dev.fops);
-    sysThrot_dev.cdev.owner = THIS_MODULE;
-    result = cdev_add(&sysThrot_dev.cdev, MKDEV(major_number, minor_number), 1);
-    if (result < 0) {
-        device_destroy(sysThrot_dev.device_class, MKDEV(major_number, minor_number));
-        class_destroy(sysThrot_dev.device_class);
-        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        printk(KERN_ALERT "%s: Failed to add cdev\n", MODNAME);
-    }
-    return result;
-}
-
-
-int device_driver_cleanup(void){
-    cdev_del(&sysThrot_dev.cdev);
-    device_destroy(sysThrot_dev.device_class, MKDEV(major_number, minor_number));
-    class_destroy(sysThrot_dev.device_class);
-    unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-    return 0;
-}
-
-
-
-
-long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
-    switch(cmd) {
-        case sysThrot_IOC_REGISTER_USER:
-            return sysThrot_register_user((TYPE_OF_DATA_PASSED_TO_IOCTL_USER)arg);
-        case sysThrot_IOC_DEREGISTER_USER:
-            return sysThrot_deregister_user((TYPE_OF_DATA_PASSED_TO_IOCTL_USER)arg);
-        case sysThrot_IOC_REGISTER_PROGRAM:
-            return sysThrot_register_program((TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM)arg);
-        case sysThrot_IOC_DEREGISTER_PROGRAM:
-            return sysThrot_deregister_program((TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM)arg);
-        case sysThrot_IOC_REGISTER_SYSCALL:
-            return sysThrot_register_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL )arg);
-        case sysThrot_IOC_DEREGISTER_SYSCALL:
-            return sysThrot_deregister_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL )arg);
-        default:
-            AUDIT
-            printk("%s: Invalid ioctl command\n", MODNAME);
-            return -EINVAL;
-    }
-}
-
-
-int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
-
-    int *user_id_ptr = kmalloc(sizeof(int), GFP_KERNEL);
-    if (!user_id_ptr) {
-        printk("%s: Failed to allocate memory for user ID\n", MODNAME);
-        return -ENOMEM;
-    }
-    if(copy_from_user(user_id_ptr, (int __user *)user_id, sizeof(int))) {
-        kfree(user_id_ptr);
-        printk("%s: Failed to copy user ID from user space\n", MODNAME);
-        return -EFAULT;
-    }
-    int ret = add_user_to_store(sysThrot_dev.store, user_id_ptr);
-
-
-    if (!ret){
-        AUDIT  
-        printk("%s: Registered user with ID %d\n", MODNAME, *user_id_ptr);
-        return 0;
-    } else if (ret == -EEXIST) {
-        AUDIT
-        printk("%s: User with ID %d is already registered\n", MODNAME, *user_id_ptr);
-        kfree(user_id_ptr);
-     }else{
-        AUDIT
-        printk("%s: Failed to register user with ID %d (err=%d)\n", MODNAME, *user_id_ptr, ret);
-        kfree(user_id_ptr);
-    }
-    return ret;
-}
-int sysThrot_deregister_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
-    int *user_id_ptr = kmalloc(sizeof(int), GFP_KERNEL);
-    if (!user_id_ptr) {
-        printk("%s: Failed to allocate memory for user ID\n", MODNAME);
-        return -ENOMEM;
-    }
-    if(copy_from_user(user_id_ptr, (int __user *)user_id, sizeof(int))) {
-        kfree(user_id_ptr);
-        printk("%s: Failed to copy user ID from user space\n", MODNAME);
-        return -EFAULT;
-    }
-    int ret = remove_user_from_store(sysThrot_dev.store, user_id_ptr);
-    
-    if (!ret)
-        printk("%s: Deregistered user with ID %d\n", MODNAME, *user_id_ptr);
-    else
-        printk("%s: User with ID %d not registered\n", MODNAME, *user_id_ptr);
-
-    kfree(user_id_ptr);
-    return ret;
-}
-int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name){
-    char *user_id_ptr :
-    int res=strncpy_from_user(user_id_ptr, (char __user *)program_name, TASK_COMM_LEN);
-    if (res<=0) {
-        AUDIT
-        printk("%s: Failed to allocate memory for user ID\n", MODNAME);
-        return res;
-    }
-    
-    res= add_program_to_store(sysThrot_dev.store, user_id_ptr);
-    if (!res){
-        AUDIT  
-        printk("%s: Registered program with name %s\n", MODNAME, user_id_ptr);
-        return 0;
-    } else if (res == -EEXIST) {
-        AUDIT
-        printk("%s: Program with name %s is already registered\n", MODNAME, user_id_ptr);
-        kfree(user_id_ptr);
-
-     }else{
-        AUDIT
-        printk("%s: Failed to register program with name %s (err=%d)\n", MODNAME, user_id_ptr, res);
-        kfree(user_id_ptr);
-
-    }
-    return ret;
-}
-int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name){
-       char *user_id_ptr :
-    int res=strncpy_from_user(program_name, (char __user *)program_name, TASK_COMM_LEN);
-    if (res<=0) {
-        AUDIT
-        printk("%s: Failed to allocate memory for user ID\n", MODNAME);
-        return res;
-    }
-    
-    res= remove_program_from_store(sysThrot_dev.store, user_id_ptr);
-    if (!res){
-        AUDIT  
-        printk("%s: removed program with name %s\n", MODNAME, user_id_ptr);
-        kfree(user_id_ptr);
-        return 0;
-    } else if (res == -EEXIST) {
-        AUDIT
-        printk("%s: Program with name %s is not registered\n", MODNAME, user_id_ptr);
-        kfree(user_id_ptr);
-
-     }else{
-        AUDIT
-        printk("%s: Failed to remove program with name %s (err=%d)\n", MODNAME, user_id_ptr, res);
-        kfree(user_id_ptr);
-
-    }
-    return ret;
-}
-
-
 inline int check_if_registered(void){
     struct task_struct *task = current;
+    int uid = current_uid().val;
     if (find_program_in_store(sysThrot_dev.store, task->comm)) {
         AUDIT
         printk("%s: Intercepted syscall from process %s (PID %d)\n", MODNAME, task->comm, task->pid);
         return  1;
-    }else if (find_user_in_store(sysThrot_dev.store, &(current_uid().val))){
+    }else if (find_user_in_store(sysThrot_dev.store, &uid)){
         AUDIT
-        printk("%s: Intercepted syscall from user with ID %d\n", MODNAME, current_uid().val);
+        printk("%s: Intercepted syscall from user with ID %d\n", MODNAME, uid);
         return 1;
     }
     return -1;
 }
 
+
+
+
 void temp(struct pt_regs *regs) {
     
-    
-    if (check_if_registered() == 1) {
-        msleep(3000);
+        if (check_if_registered() == 1) {
+            printk("%s: Throttling syscall for user %d\n", MODNAME, current_uid().val);
     }
 }
 
@@ -370,7 +203,7 @@ int removeProbe(int syscall_id){
         goto alredy_probed;
     if (syscall_id < 0 || syscall_id >= ARRAY_SIZE(syscall_symbols))
         return -EINVAL; 
-    if( sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8))==0 )
+    if( (sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8)))==0 )
             return -EINVAL; 
     kp.symbol_name = syscall_symbols[syscall_id];
     int result = register_kprobe(&kp);
@@ -406,17 +239,51 @@ int removeProbe(int syscall_id){
         sysThrot_dev.syscall_presence_bitmap[syscall_id/8] &= ~(1 << (syscall_id % 8));
         return 1;
 }   
-int sysThrot_register_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id){
-    
-    return installProbe(syscall_id);
+
+
+
+
+int device_driver_init(void){
+    dev_t dev;
+    int result;
+    result=alloc_chrdev_region(&dev, minor_number, 1, DEVICE_NAME);
+    major_number=MAJOR(dev);
+    if (result < 0) {
+        printk(KERN_ALERT "%s: Failed to allocate a major number\n", MODNAME);
+        return result;
+    }
+    sysThrot_dev.device_class=class_create(DEVICE_NAME);
+    if(IS_ERR(sysThrot_dev.device_class)){
+        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
+        printk(KERN_ALERT "%s: Failed to create device class\n", MODNAME);
+        return PTR_ERR(sysThrot_dev.device_class);
+    }
+    if(device_create(sysThrot_dev.device_class, NULL, MKDEV(major_number, minor_number), NULL, DEVICE_NAME) == NULL){
+        class_destroy(sysThrot_dev.device_class);
+        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
+        printk(KERN_ALERT "%s: Failed to create device\n", MODNAME);
+        return -1;
+    }
+    cdev_init(&sysThrot_dev.cdev, &sysThrot_dev.fops);
+    sysThrot_dev.cdev.owner = THIS_MODULE;
+    result = cdev_add(&sysThrot_dev.cdev, MKDEV(major_number, minor_number), 1);
+    if (result < 0) {
+        device_destroy(sysThrot_dev.device_class, MKDEV(major_number, minor_number));
+        class_destroy(sysThrot_dev.device_class);
+        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
+        printk(KERN_ALERT "%s: Failed to add cdev\n", MODNAME);
+    }
+    return result;
 }
-int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id){
-    return removeProbe(syscall_id);
+
+
+int device_driver_cleanup(void){
+    cdev_del(&sysThrot_dev.cdev);
+    device_destroy(sysThrot_dev.device_class, MKDEV(major_number, minor_number));
+    class_destroy(sysThrot_dev.device_class);
+    unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
+    return 0;
 }
-
-
-
-
 
 
 
@@ -424,10 +291,9 @@ int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id)
 
 int sysThrot_init(void) {
     int ret;
-    sysThrot_dev.max_calls = max_calls_monitor;
     printk("%s: initializing\n",MODNAME);
-    printk("%d concurrent calls allowed\n", max_calls_monitor);
-    sysThrot_driver_init_store(&sysThrot_dev.store);
+    printk("%ld concurrent calls allowed\n", max_calls_monitor);
+    init_sysThrot_store(&sysThrot_dev.store);
     ret = device_driver_init();
     if (ret < 0) {
         printk("%s: device driver init failed\n",MODNAME);
@@ -440,11 +306,16 @@ int sysThrot_init(void) {
 
 
 void sysThrot_cleanup(void) {
-    sysThrot_driver_cleanup_store(&sysThrot_dev.store);
+    destroy_sysThrot_store(sysThrot_dev.store);
     device_driver_cleanup();
 
     printk("%s: shutting down\n",MODNAME);
 }
+
+
+module_init(sysThrot_init);
+module_exit(sysThrot_cleanup);
+
 
 static const char *syscall_symbols[333] = {
     "__x64_sys_read",
@@ -497,35 +368,6 @@ static const char *syscall_symbols[333] = {
     "__x64_sys_recvmsg",
     "__x64_sys_shutdown",
     "__x64_sys_bind",
-    "__x64_sys_listen",
-    "__x64_sys_getsockname",
-    "__x64_sys_getpeername",
-    "__x64_sys_socketpair",
-    "__x64_sys_setsockopt",
-    "__x64_sys_getsockopt",
-    "__x64_sys_clone",
-    "__x64_sys_fork",
-    "__x64_sys_vfork",
-    "__x64_sys_execve",
-    "__x64_sys_exit",
-    "__x64_sys_wait4",
-    "__x64_sys_kill",
-    "__x64_sys_uname",
-    "__x64_sys_semget",
-    "__x64_sys_semop",
-    "__x64_sys_semctl",
-    "__x64_sys_shmdt",
-    "__x64_sys_msgget",
-    "__x64_sys_msgsnd",
-    "__x64_sys_msgrcv",
-    "__x64_sys_msgctl",
-    "__x64_sys_fcntl",
-    "__x64_sys_flock",
-    "__x64_sys_fsync",
-    "__x64_sys_fdatasync",
-    "__x64_sys_truncate",
-    "__x64_sys_ftruncate",
-    "__x64_sys_getdents",
     "__x64_sys_getcwd",
     "__x64_sys_chdir",
     "__x64_sys_fchdir",
@@ -785,5 +627,3 @@ static const char *syscall_symbols[333] = {
 
 
 
-module_init(sysThrot_init);
-module_exit(sysThrot_cleanup);

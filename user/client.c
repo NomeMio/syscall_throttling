@@ -68,8 +68,13 @@ int register_program(const char* program_name) {
 	return 0;
 }
 
+#define GET_PID 39
 
 
+void get_pid() {
+	pid_t pid = getpid();
+	printf("Current PID: %d\n", pid);
+}
 
 int main(int argc, char** argv){
        
@@ -84,14 +89,14 @@ int main(int argc, char** argv){
 	register_program(program_name);
 	register_program(program_name1);
 	register_program(program_name2);
-	register_syscall(2); 
-	open("/dev/null", O_RDONLY);
-	register_syscall(3);
-	deregister_syscall(2); 
+	int pid = getpid();
+	get_pid();
+	register_syscall(GET_PID); 
+	get_pid();
+	get_pid();
+	deregister_syscall(GET_PID);
+	get_pid();
 
-	register_syscall(4);
-	deregister_syscall(3);
-	deregister_syscall(4);
 	return 0;
 	
 	}
