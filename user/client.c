@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 #include <sys/fcntl.h>
 #include "./lib/sysThrot.h"
+#include <time.h>
 
 
 
@@ -50,6 +51,41 @@ int deregister_syscall(int syscall_id) {
 }
 
 
+int turn_off_monitor() {
+	int fd = open(DEVICE_PATH, O_RDWR);
+	if (fd < 0) {
+		perror("Failed to open device");
+		return -1;
+	}
+
+	if (ioctl(fd, sysThrot_IOC_TURN_OFF) < 0) {
+		perror("Failed to send ioctl command");
+		close(fd);
+		return -1;
+	}
+
+	printf("Ioctl command sent successfully for turning off throttling\n");
+	close(fd);
+	return 0;
+}
+int turn_on_monitor() {
+	int fd = open(DEVICE_PATH, O_RDWR);
+	if (fd < 0) {
+		perror("Failed to open device");
+		return -1;
+	}
+
+	if (ioctl(fd, sysThrot_IOC_TURN_ON) < 0) {
+		perror("Failed to send ioctl command");
+		close(fd);
+		return -1;
+	}
+
+	printf("Ioctl command sent successfully for turning on throttling\n");
+	close(fd);
+	return 0;
+}
+
 int register_program(const char* program_name) {
 	int fd = open(DEVICE_PATH, O_RDWR);
 	if (fd < 0) {
@@ -69,7 +105,7 @@ int register_program(const char* program_name) {
 }
 
 #define GET_PID 39
-
+#define OPEN 2
 
 void get_pid() {
 	pid_t pid = getpid();
@@ -92,11 +128,12 @@ int main(int argc, char** argv){
 	int pid = getpid();
 	get_pid();
 	register_syscall(GET_PID); 
-	get_pid();
-	get_pid();
-	deregister_syscall(GET_PID);
-	get_pid();
+	for(int i=0;i<16;i++){
+		get_pid();
+	}
 
+	deregister_syscall(GET_PID);
+	
 	return 0;
 	
 	}

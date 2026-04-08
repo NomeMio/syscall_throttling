@@ -59,8 +59,10 @@ int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_nam
 int sysThrot_register_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
 int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
 
+
+void timer_callback(struct timer_list *timer);
 inline int check_if_registered(void);
-void temp(struct pt_regs *regs);
+void stub(struct pt_regs *regs);
 int installProbe(int syscall_id);
 int removeProbe(int syscall_id);
 
@@ -79,12 +81,6 @@ const struct file_operations fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = sysThrot_ioctl,
 };
-
-
-
-
-
-
 struct sysThrot_driver sysThrot_dev = {
     .fops = fops,
     .bitmap_size=__NR_syscalls/8+1,
@@ -110,11 +106,34 @@ inline int check_if_registered(void){
 
 
 
-void temp(struct pt_regs *regs) {
-    
-        if (check_if_registered() == 1) {
-            printk("%s: Throttling syscall for user %d\n", MODNAME, current_uid().val);
+void stub(struct pt_regs *regs) {
+    atomic_inc(&sysThrot_dev.critical.threads_in_stub);
+    if(sysThrot_dev.working==0) {
+        AUDIT
+        printk("%s: Throttling is OFF, allowing syscall\n", MODNAME);
+       goto end;
     }
+    if (check_if_registered() != 1) {
+        goto end;
+    }
+    // start to do stuff for throttled stuff    
+    DECLARE_WAIT_QUEUE_HEAD(wait_q);
+
+    int tokens_left = atomic_dec_return(&sysThrot_dev.critical.current_epoch_tokens);
+    if (tokens_left >= 0) {//decrementing and after checking permits to not worry about concurrency
+        goto end;
+    }
+    struct task_struct *task = current;
+    struct _queue_elem elem;
+    elem.task = task;
+    elem.to_wake = 0;
+    elem.next = NULL;
+    AUDIT
+    printk("%s: No tokens left for this epoch, putting process %s (PID %d) to sleep\n", MODNAME, task->comm, task->pid);
+    end:
+    atomic_dec(&sysThrot_dev.critical.threads_in_stub);
+    return;
+    
 }
 
 
@@ -129,8 +148,14 @@ asm(
 "    pushq %rdx\n"
 "    pushq %rcx\n"
 "    pushq %r11\n"
-"    call temp\n"  // Call your C function
-"    popq %r11\n"  // Restore everything exactly as it was
+"    pushq %r10\n"
+"    pushq %r9\n"
+"    pushq %r8\n"
+"    call stub\n"  // Call your C function
+"    popq %r8\n"  // Restore everything exactly as it was
+"    popq %r9\n"
+"    popq %r10\n"
+"    popq %r11\n"
 "    popq %rcx\n"
 "    popq %rdx\n"
 "    popq %rsi\n"
@@ -147,7 +172,7 @@ int installProbe(int syscall_id){
     if (sysThrot_dev.syscall_addresses[syscall_id] != 0) 
         goto alredy_probed;
     AUDIT
-    printk("%s: Installing kprobe for syscall (ID %d)\n", MODNAME, syscall_id);
+    printk("%s: Installing kprobe for syscall (ID %d) registration\n", MODNAME, syscall_id);
 
     if (syscall_id < 0 || syscall_id >= ARRAY_SIZE(syscall_symbols))
         return -EINVAL;
@@ -162,7 +187,7 @@ int installProbe(int syscall_id){
 
     int result = register_kprobe(&kp);
     if (result) {
-        printk("%s: Failed to register kprobe for syscall (ID %d), with error %d\n", MODNAME, syscall_id,result);
+        printk("%s: Failed to register kprobe for syscall (ID %d) registration, with error %d\n", MODNAME, syscall_id,result);
         return result;
     }  
     //sarebbe da sistemare per poi metterlo apposto
@@ -171,14 +196,14 @@ int installProbe(int syscall_id){
     kp.addr= 0;
     sysThrot_dev.syscall_addresses[syscall_id]=addr_sys;
     AUDIT
-    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx for registration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
 
     goto end;
     
     alredy_probed:
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
         AUDIT
-        printk("%s: Syscall (ID %d) %s is already probed at address 0x%lx\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+        printk("%s: Syscall (ID %d) %s is already probed at address 0x%lx for registration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
     end:
         int INTS_LEN=5;
         char call_instruction[INTS_LEN];
@@ -186,9 +211,11 @@ int installProbe(int syscall_id){
         int offset = (unsigned long)stub_trampoline - addr_sys - INTS_LEN;
         memcpy(call_instruction + 1, &offset, sizeof(int));
         unsigned long cr0, cr4;
+        preempt_disable();
         being_sys_call_hacking(&cr0, &cr4);
         memcpy((void *)addr_sys, call_instruction, INTS_LEN);
         end_sys_call_hacking(cr0, cr4);
+        preempt_enable();
         sysThrot_dev.syscall_presence_bitmap[syscall_id/8] |= (1 << (syscall_id % 8));
         return 1;
 }
@@ -208,7 +235,7 @@ int removeProbe(int syscall_id){
     kp.symbol_name = syscall_symbols[syscall_id];
     int result = register_kprobe(&kp);
     if (result) {
-        printk("%s: Failed to register kprobe for syscall (ID %d), with error %d\n", MODNAME, syscall_id,result);
+        printk("%s: Failed to register kprobe for syscall (ID %d) deregistration, with error %d\n", MODNAME, syscall_id,result);
         return -1;
     }   
     //sarebbe da sistemare per poi metterlo apposto
@@ -216,26 +243,31 @@ int removeProbe(int syscall_id){
     sysThrot_dev.syscall_addresses[syscall_id]=addr_sys;
     unregister_kprobe(&kp);
     AUDIT
-    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx for deregistration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
 
     goto end;
     alredy_probed:
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
         AUDIT
-        printk("%s: Syscall (ID %d) %s is already probed at address 0x%lx\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+        printk("%s: Syscall (ID %d) %s is already probed at address 0x%lx for deregistration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
     end:
         kp.addr= 0;
         int INTS_LEN=5;
+        
         char call_instruction[INTS_LEN];
-        call_instruction[0]=0x0f; // putting multi NOP, putting 5 normale nops may trigger ftrace exceptions.
+        
+        call_instruction[0]=0x0f; // putting multi NOP, putting 5 normale nops sometimes trigger some strange error's with ftrace, TODO check normal NOP.
         call_instruction[1]=0x1f;
         call_instruction[2]=0x44;
         call_instruction[3]=0x00;
         call_instruction[4]=0x00;
+        
         unsigned long cr0, cr4;
+        preempt_disable();
         being_sys_call_hacking(&cr0, &cr4);
         memcpy((void *)addr_sys, call_instruction, INTS_LEN);
         end_sys_call_hacking(cr0, cr4);
+        preempt_enable();
         sysThrot_dev.syscall_presence_bitmap[syscall_id/8] &= ~(1 << (syscall_id % 8));
         return 1;
 }   
@@ -286,7 +318,13 @@ int device_driver_cleanup(void){
 }
 
 
+void timer_callback(struct timer_list *timer){
+        atomic_inc(&sysThrot_dev.critical.epoch);
+        //naturalmente questo e solo per testing
+        atomic_set(&sysThrot_dev.critical.current_epoch_tokens, sysThrot_dev.max_syscalls_for_epoch);
 
+        if(sysThrot_dev.working) mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
+}
 
 
 int sysThrot_init(void) {
@@ -299,13 +337,73 @@ int sysThrot_init(void) {
         printk("%s: device driver init failed\n",MODNAME);
         return ret;
     }
-
+    sysThrot_dev.working=0;
+    sysThrot_dev.max_syscalls_for_epoch=max_calls_monitor;
+    atomic_set(&sysThrot_dev.critical.threads_in_stub, 0);
+    atomic_set(&sysThrot_dev.critical.epoch, 0);
+    ret= sysThrot_turn_on();
+    if (ret < 0) {
+        device_driver_cleanup();
+        printk("%s: failed to turn on throttling\n",MODNAME);
+        return ret;
+    }
     printk("%s: module correctly mounted\n",MODNAME);
     return 0;
 }
 
+int sysThrot_turn_on(void){
+    int ret;
+    if(sysThrot_dev.working==1)
+        return -EALREADY; //non so cos altro usare
+    spin_lock_init(&sysThrot_dev.critical.queue_lock);
+    sysThrot_dev.critical.sentinel_head.task = NULL;
+    sysThrot_dev.critical.sentinel_head.to_wake = 0;
+    sysThrot_dev.critical.sentinel_head.next = NULL;
+    sysThrot_dev.critical.sentinel_tail.task = NULL;
+    sysThrot_dev.critical.sentinel_tail.to_wake = 0;
+    sysThrot_dev.critical.sentinel_tail.next = &sysThrot_dev.critical.sentinel_head;
+    timer_setup(&sysThrot_dev.timer, timer_callback, 0);
+    ret=mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
+    if (ret) {
+        printk("%s: Error in mod_timer\n", MODNAME);
+        return ret;
+    }
+    sysThrot_dev.working=1;
+    printk("%s: Throttling turned ON\n",MODNAME);
+    return 0;
+}
+
+
+int sysThrot_turn_off(void){
+    if(sysThrot_dev.working==0)
+        return -EALREADY; //non so cos altro usare#
+    //TODO: add list smounting
+    timer_shutdown_sync(&sysThrot_dev.timer);
+    sysThrot_dev.working=0;
+    printk("%s: Throttling turned OFF\n",MODNAME);
+    return 0;
+}
 
 void sysThrot_cleanup(void) {
+    sysThrot_turn_off();
+    int left;
+    do{
+        left=atomic_read(&sysThrot_dev.critical.threads_in_stub);
+        if(left>0){
+            printk("%s: Waiting for %d threads to exit the stub before cleanup\n",MODNAME,left);
+            msleep(100); 
+        }
+    }while(left>0);
+    for(int i=0;i<__NR_syscalls/8+1;i++){
+        if(sysThrot_dev.syscall_presence_bitmap[i]!=0){
+            for(int j=0;j<8;j++){
+                int syscall_id=i*8+j;
+                if(sysThrot_dev.syscall_presence_bitmap[i] & (1 << j)){
+                    removeProbe(syscall_id);
+                }
+            }
+        }
+    }
     destroy_sysThrot_store(sysThrot_dev.store);
     device_driver_cleanup();
 

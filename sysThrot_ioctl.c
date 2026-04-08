@@ -34,12 +34,17 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
             return sysThrot_register_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL )arg);
         case sysThrot_IOC_DEREGISTER_SYSCALL:
             return sysThrot_deregister_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL )arg);
+        case sysThrot_IOC_TURN_ON:
+            return sysThrot_turn_on();
+        case sysThrot_IOC_TURN_OFF:
+            return sysThrot_turn_off();
         default:
             AUDIT
             printk("%s: Invalid ioctl command\n", MODNAME);
             return -EINVAL;
     }
 }
+
 
 
 int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
