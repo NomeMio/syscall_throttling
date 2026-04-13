@@ -1,21 +1,7 @@
-obj-m += sysThrot_module.o
-sysThrot_module-objs += sysThrot_store.o  sysThrot.o  sysThrot_ioctl.o  sysThrot_log.o
+compile_client: generate_syscalls_header
+	gcc -o client client.c -I./lib
 
 
-#syscall_address = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)
-
-#sys_call_table_address=$(syscall_address)
-all: generate_syscalls_header
-	@make -C /lib/modules/$(shell uname -r)/build M=$(PWD) V=1 modules > output.log 2>&1
-
-clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
-
-load:
-	insmod sysThrot_module.ko  max_calls_monitor=20
-
-remove:
-	rmmod sysThrot_module 
 
 
 load_sys_calls:
@@ -36,3 +22,4 @@ generate_syscalls_header: load_sys_calls
 	@echo "" >> syscalls.h
 	@echo "#endif" >> syscalls.h
 	rm -f sys_calls_symbols.txt
+	mv syscalls.h ./lib/syscalls.h

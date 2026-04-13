@@ -273,6 +273,7 @@ int compareUser(const void *a, const void *b) {
 }
 
 int compareProgram(const void *a, const void *b) {
+ 
     return strcmp((char *)a, (char *)b) == 0;
 }
 

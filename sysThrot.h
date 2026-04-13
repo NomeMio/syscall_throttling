@@ -5,6 +5,7 @@
 #include <linux/cdev.h>
 #include <linux/timer.h>
 #include <linux/atomic.h>
+#include "./syscalls.h"
 
 
 #define  AUDIT if(1)
@@ -12,6 +13,8 @@
 #define DEVICE_NAME "sysThrot_dev"
 #define EPOCH_DURATION_MS 1000
 #define sysThrot_IOC_MAGIC '-'
+
+#define SYS_AUDIT_LOG(fmt, ...) sysThrot_log("%s: " fmt, MODNAME, ##__VA_ARGS__)
 
 #define TYPE_OF_DATA_PASSED_TO_IOCTL_USER int*
 #define TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM char *
@@ -30,26 +33,37 @@
 
 
 
-/* Driver structure and related definitions */
-
-#define SUPPORTED_SYSCALLS 333
-
-
-
 struct _queue_elem{
     struct task_struct *task;
-    int to_wake;
+    int was_interrupted;
+    int *to_wake;
     struct _queue_elem *next;
 };
 
 
 
 
+
+/*
+* @threads_in_stub:
+*       Tenuto per controllare quanti thread si trovano al iterno dello stub che il modulo monta nelle syscall,
+*       cosi da evitare errori di accesso in memoria da parte del kernel in fase di smontaggio
+* @threads_in_module:
+*       BLA
+* 
+*
+*/
+
+
+
 struct sysThrot_critical
 {
+    
     atomic_t threads_in_stub;
+    atomic_t threads_in_module;
     atomic_t current_epoch_tokens;
     spinlock_t queue_lock;
+    spinlock_t interrupt_lock;
     struct _queue_elem sentinel_head;//.next has first element
     struct _queue_elem sentinel_tail;//.next has last element
 
@@ -67,7 +81,7 @@ struct sysThrot_driver
     unsigned working;
     struct sysThrot_critical critical;
     struct _sysThrot_Store *store;
-    unsigned long max_syscalls_for_epoch;
+    int max_syscalls_for_epoch; //TODO da vedere se lasciarlo int visto che atomic_t al massimo e' int signed
     char syscall_presence_bitmap[__NR_syscalls/8+1];
     int bitmap_size;
     unsigned long syscall_addresses[SUPPORTED_SYSCALLS];
@@ -100,7 +114,6 @@ int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id)
 int sysThrot_turn_off(void);
 int sysThrot_turn_on(void);
 
-
 struct _sysThrot_Store;
 
 int init_sysThrot_store(struct _sysThrot_Store **store);
@@ -113,6 +126,11 @@ int remove_program_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED
 int find_program_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
 int sysThrot_turn_on(void);
 int sysThrot_turn_off(void);
+
+int sysThrot_log_init(void);
+void sysThrot_log_cleanup(void);
+void sysThrot_log(const char *fmt, ...);
+
 
 
 /* Memory Protection Functions */

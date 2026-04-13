@@ -24,6 +24,9 @@
 #include <linux/delay.h>
 #include <linux/cred.h>
 
+
+
+
 //#include "./include/vtpmo.h"
 #include "./sysThrot.h"
 
@@ -31,7 +34,8 @@
 
 
 
-#define SUPPORTED_SYSCALLS 333
+
+
 
 
 
@@ -40,6 +44,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nessuno");
 MODULE_DESCRIPTION("Syscall Throttling Module");
 
+DECLARE_WAIT_QUEUE_HEAD(wait_q);
 
 int major_number;
 int minor_number=0;
@@ -47,17 +52,10 @@ int minor_number=0;
 unsigned long max_calls_monitor = 0;
 module_param(max_calls_monitor, ulong, 0660);
 
-/* Forward declarations for functions implemented in this translation unit. */
 int device_driver_init(void);
 int device_driver_cleanup(void);
 
-long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
-int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
-int sysThrot_deregister_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id);
-int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name);
-int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name);
-int sysThrot_register_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
-int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id);
+
 
 
 void timer_callback(struct timer_list *timer);
@@ -71,8 +69,8 @@ void sysThrot_cleanup(void);
 
 extern void stub_trampoline(void);
 
+static const char *syscall_symbols[];
 
-static const char *syscall_symbols[SUPPORTED_SYSCALLS];
 
 
 //Device driver stuff
@@ -90,15 +88,18 @@ struct sysThrot_driver sysThrot_dev = {
 
 inline int check_if_registered(void){
     struct task_struct *task = current;
-    int uid = current_uid().val;
-    if (find_program_in_store(sysThrot_dev.store, task->comm)) {
+    if (find_program_in_store(sysThrot_dev.store, task->comm) ==  0) {
         AUDIT
-        printk("%s: Intercepted syscall from process %s (PID %d)\n", MODNAME, task->comm, task->pid);
-        return  1;
-    }else if (find_user_in_store(sysThrot_dev.store, &uid)){
-        AUDIT
-        printk("%s: Intercepted syscall from user with ID %d\n", MODNAME, uid);
+        SYS_AUDIT_LOG("Intercepted syscall from process %s (PID %d)", task->comm, task_pid_nr(task));
         return 1;
+    } else {
+        int uid = __kuid_val(current_uid());
+
+        if (find_user_in_store(sysThrot_dev.store, &uid) == 0) {
+            AUDIT
+            SYS_AUDIT_LOG("Intercepted syscall from user with ID %u", uid);
+            return 1;
+        }
     }
     return -1;
 }
@@ -109,28 +110,45 @@ inline int check_if_registered(void){
 void stub(struct pt_regs *regs) {
     atomic_inc(&sysThrot_dev.critical.threads_in_stub);
     if(sysThrot_dev.working==0) {
-        AUDIT
-        printk("%s: Throttling is OFF, allowing syscall\n", MODNAME);
-       goto end;
+       goto global_end;
     }
+    atomic_inc(&sysThrot_dev.critical.threads_in_module);
     if (check_if_registered() != 1) {
         goto end;
     }
-    // start to do stuff for throttled stuff    
-    DECLARE_WAIT_QUEUE_HEAD(wait_q);
 
+    unsigned long flags;
+    int wakeup_flag=0;
+    //TODO: si potrebbe fare un meccanismo di sync/cons migliore
+    spin_lock_irqsave(&sysThrot_dev.critical.queue_lock, flags);
     int tokens_left = atomic_dec_return(&sysThrot_dev.critical.current_epoch_tokens);
-    if (tokens_left >= 0) {//decrementing and after checking permits to not worry about concurrency
+    if (tokens_left >= 0) {
+            spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);
         goto end;
     }
     struct task_struct *task = current;
-    struct _queue_elem elem;
-    elem.task = task;
-    elem.to_wake = 0;
-    elem.next = NULL;
-    AUDIT
-    printk("%s: No tokens left for this epoch, putting process %s (PID %d) to sleep\n", MODNAME, task->comm, task->pid);
+    struct _queue_elem *elem = kmalloc(sizeof(struct _queue_elem), GFP_KERNEL);
+    if (!elem) {
+        spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);
+        goto end;
+    }
+    elem->task = task;
+    elem->to_wake = &wakeup_flag;
+    elem->was_interrupted = 0;
+    elem->next = NULL;
+    sysThrot_dev.critical.sentinel_tail.next->next = elem;
+    sysThrot_dev.critical.sentinel_tail.next = elem;
+    spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);   
+    int res=wait_event_interruptible(wait_q, wakeup_flag == 1 || sysThrot_dev.working == 0);
+    if (res == -ERESTARTSYS) {
+        spin_lock_irqsave(&sysThrot_dev.critical.interrupt_lock, flags);
+        elem->was_interrupted = 1;
+        spin_unlock_irqrestore(&sysThrot_dev.critical.interrupt_lock, flags);
+        SYS_AUDIT_LOG("wait interrupted by signal for process %s (PID %d)", task->comm, task_pid_nr(task));
+    }
     end:
+    atomic_dec(&sysThrot_dev.critical.threads_in_module);
+    global_end:
     atomic_dec(&sysThrot_dev.critical.threads_in_stub);
     return;
     
@@ -142,7 +160,7 @@ void stub(struct pt_regs *regs) {
 asm(
 ".global stub_trampoline\n"
 "stub_trampoline:\n"
-"    pushq %rax\n" // Save all registers that the syscall needs
+"    pushq %rax\n" 
 "    pushq %rdi\n"
 "    pushq %rsi\n"
 "    pushq %rdx\n"
@@ -151,8 +169,8 @@ asm(
 "    pushq %r10\n"
 "    pushq %r9\n"
 "    pushq %r8\n"
-"    call stub\n"  // Call your C function
-"    popq %r8\n"  // Restore everything exactly as it was
+"    call stub\n"  
+"    popq %r8\n"  
 "    popq %r9\n"
 "    popq %r10\n"
 "    popq %r11\n"
@@ -161,7 +179,7 @@ asm(
 "    popq %rsi\n"
 "    popq %rdi\n"
 "    popq %rax\n"
-"    ret\n"        // Return to the instruction AFTER your injected CALL
+"    ret\n"        
 );
 extern void stub_trampoline(void);
 
@@ -171,23 +189,20 @@ int installProbe(int syscall_id){
     unsigned long addr_sys;
     if (sysThrot_dev.syscall_addresses[syscall_id] != 0) 
         goto alredy_probed;
-    AUDIT
-    printk("%s: Installing kprobe for syscall (ID %d) registration\n", MODNAME, syscall_id);
-
-    if (syscall_id < 0 || syscall_id >= ARRAY_SIZE(syscall_symbols))
+    //SYS_AUDIT_LOG("Installing kprobe for syscall (ID %d) registration", syscall_id);
+    if (syscall_id < 0 || syscall_id >= SUPPORTED_SYSCALLS)
         return -EINVAL;
 
     kp.symbol_name = syscall_symbols[syscall_id];
    
     if (sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8))) {
-        AUDIT
-        printk("%s: Syscall (ID %d) is already registered\n", MODNAME, syscall_id);
+        //SYS_AUDIT_LOG("Syscall (ID %d: %s) is already registered", syscall_id, syscall_symbols[syscall_id]);
         return -EEXIST;
     }
 
     int result = register_kprobe(&kp);
     if (result) {
-        printk("%s: Failed to register kprobe for syscall (ID %d) registration, with error %d\n", MODNAME, syscall_id,result);
+        SYS_AUDIT_LOG("%s: Failed to register kprobe for syscall (ID %d: %s) registration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], result);
         return result;
     }  
     //sarebbe da sistemare per poi metterlo apposto
@@ -196,14 +211,14 @@ int installProbe(int syscall_id){
     kp.addr= 0;
     sysThrot_dev.syscall_addresses[syscall_id]=addr_sys;
     AUDIT
-    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx for registration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+    SYS_AUDIT_LOG("Probed syscall (ID %d: %s) at address 0x%lx for registration", syscall_id, syscall_symbols[syscall_id], addr_sys);
 
     goto end;
     
     alredy_probed:
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
         AUDIT
-        printk("%s: Syscall (ID %d) %s is already probed at address 0x%lx for registration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+        SYS_AUDIT_LOG("Syscall (ID %d: %s) is already probed at address 0x%lx for registration", syscall_id, syscall_symbols[syscall_id], addr_sys);
     end:
         int INTS_LEN=5;
         char call_instruction[INTS_LEN];
@@ -228,28 +243,25 @@ int removeProbe(int syscall_id){
     
     if (sysThrot_dev.syscall_addresses[syscall_id] !=  0)
         goto alredy_probed;
-    if (syscall_id < 0 || syscall_id >= ARRAY_SIZE(syscall_symbols))
-        return -EINVAL; 
+    if (syscall_id < 0 || syscall_id >= SUPPORTED_SYSCALLS)
+        return -EINVAL;
     if( (sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8)))==0 )
             return -EINVAL; 
     kp.symbol_name = syscall_symbols[syscall_id];
     int result = register_kprobe(&kp);
     if (result) {
-        printk("%s: Failed to register kprobe for syscall (ID %d) deregistration, with error %d\n", MODNAME, syscall_id,result);
+        SYS_AUDIT_LOG("%s: Failed to register kprobe for syscall (ID %d: %s) deregistration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], result);
         return -1;
     }   
     //sarebbe da sistemare per poi metterlo apposto
     addr_sys = (unsigned long)kp.addr;
     sysThrot_dev.syscall_addresses[syscall_id]=addr_sys;
     unregister_kprobe(&kp);
-    AUDIT
-    printk("%s: Probed syscall (ID %d) %s  at address 0x%lx for deregistration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
+    SYS_AUDIT_LOG("Probed syscall (ID %d: %s) at address 0x%lx for deregistration", syscall_id, syscall_symbols[syscall_id], addr_sys);
 
     goto end;
     alredy_probed:
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
-        AUDIT
-        printk("%s: Syscall (ID %d) %s is already probed at address 0x%lx for deregistration\n", MODNAME, syscall_id,syscall_symbols[syscall_id], addr_sys);
     end:
         kp.addr= 0;
         int INTS_LEN=5;
@@ -317,37 +329,74 @@ int device_driver_cleanup(void){
     return 0;
 }
 
-
+ 
 void timer_callback(struct timer_list *timer){
-        atomic_inc(&sysThrot_dev.critical.epoch);
-        //naturalmente questo e solo per testing
-        atomic_set(&sysThrot_dev.critical.current_epoch_tokens, sysThrot_dev.max_syscalls_for_epoch);
-
+        int new_epoche_tokens=sysThrot_dev.max_syscalls_for_epoch;
+        unsigned long flags;
+        spin_lock_irqsave(&sysThrot_dev.critical.queue_lock, flags);
+        struct _queue_elem *elem = sysThrot_dev.critical.sentinel_head.next;
+        
+        wake_up_loop:
+            if (elem == NULL) {
+                sysThrot_dev.critical.sentinel_tail.next = &sysThrot_dev.critical.sentinel_head;
+                goto end_wake_up_loop;
+            }
+            if (new_epoche_tokens <= 0) {
+                goto end_wake_up_loop;
+            }
+            long flags_interrupt;
+            spin_lock_irqsave(&sysThrot_dev.critical.interrupt_lock, flags_interrupt);
+            if(elem->was_interrupted==0)
+                *(elem->to_wake) = 1;
+            spin_unlock_irqrestore(&sysThrot_dev.critical.interrupt_lock, flags_interrupt);
+            struct _queue_elem *to_free = elem;
+            elem = elem->next;
+            kfree(to_free);
+            sysThrot_dev.critical.sentinel_head.next = elem;
+            new_epoche_tokens--;
+            goto wake_up_loop;
+        end_wake_up_loop:
+            wake_up_interruptible(&wait_q);
+            atomic_inc(&sysThrot_dev.critical.epoch);
+            atomic_set(&sysThrot_dev.critical.current_epoch_tokens, new_epoche_tokens);
+            spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);
         if(sysThrot_dev.working) mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
 }
 
 
 int sysThrot_init(void) {
+    printk("%s: initializing module\n", MODNAME);
     int ret;
-    printk("%s: initializing\n",MODNAME);
-    printk("%ld concurrent calls allowed\n", max_calls_monitor);
+    ret = sysThrot_log_init();
+    if (ret < 0) {
+        printk(KERN_ALERT "%s: failed to initialize pseudo log\n", MODNAME);
+        return ret;
+    }
+    SYS_AUDIT_LOG("initializing");
+    SYS_AUDIT_LOG("%ld concurrent calls allowed", max_calls_monitor);
     init_sysThrot_store(&sysThrot_dev.store);
     ret = device_driver_init();
     if (ret < 0) {
         printk("%s: device driver init failed\n",MODNAME);
+        sysThrot_log_cleanup();
         return ret;
     }
     sysThrot_dev.working=0;
     sysThrot_dev.max_syscalls_for_epoch=max_calls_monitor;
+    spin_lock_init(&sysThrot_dev.critical.queue_lock);
+    spin_lock_init(&sysThrot_dev.critical.interrupt_lock);
     atomic_set(&sysThrot_dev.critical.threads_in_stub, 0);
     atomic_set(&sysThrot_dev.critical.epoch, 0);
+    atomic_set(&sysThrot_dev.critical.current_epoch_tokens, 0);
     ret= sysThrot_turn_on();
     if (ret < 0) {
         device_driver_cleanup();
         printk("%s: failed to turn on throttling\n",MODNAME);
+        sysThrot_log_cleanup();
         return ret;
     }
-    printk("%s: module correctly mounted\n",MODNAME);
+    printk("%s: module loaded\n", MODNAME);
+    SYS_AUDIT_LOG("module correctly mounted");
     return 0;
 }
 
@@ -355,12 +404,13 @@ int sysThrot_turn_on(void){
     int ret;
     if(sysThrot_dev.working==1)
         return -EALREADY; //non so cos altro usare
-    spin_lock_init(&sysThrot_dev.critical.queue_lock);
     sysThrot_dev.critical.sentinel_head.task = NULL;
-    sysThrot_dev.critical.sentinel_head.to_wake = 0;
+    sysThrot_dev.critical.sentinel_head.to_wake = NULL;
+    sysThrot_dev.critical.sentinel_head.was_interrupted=0;
     sysThrot_dev.critical.sentinel_head.next = NULL;
     sysThrot_dev.critical.sentinel_tail.task = NULL;
-    sysThrot_dev.critical.sentinel_tail.to_wake = 0;
+    sysThrot_dev.critical.sentinel_tail.to_wake = NULL;
+    sysThrot_dev.critical.sentinel_tail.was_interrupted=0;
     sysThrot_dev.critical.sentinel_tail.next = &sysThrot_dev.critical.sentinel_head;
     timer_setup(&sysThrot_dev.timer, timer_callback, 0);
     ret=mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
@@ -369,7 +419,7 @@ int sysThrot_turn_on(void){
         return ret;
     }
     sysThrot_dev.working=1;
-    printk("%s: Throttling turned ON\n",MODNAME);
+    SYS_AUDIT_LOG("Throttling turned ON");
     return 0;
 }
 
@@ -377,10 +427,21 @@ int sysThrot_turn_on(void){
 int sysThrot_turn_off(void){
     if(sysThrot_dev.working==0)
         return -EALREADY; //non so cos altro usare#
-    //TODO: add list smounting
-    timer_shutdown_sync(&sysThrot_dev.timer);
-    sysThrot_dev.working=0;
-    printk("%s: Throttling turned OFF\n",MODNAME);
+    timer_shutdown_sync(&sysThrot_dev.timer);   
+    sysThrot_dev.working=0; 
+    while(atomic_read(&sysThrot_dev.critical.threads_in_module)>0){
+            SYS_AUDIT_LOG("Waiting for %d threads to exit the module before turning off throttling", atomic_read(&sysThrot_dev.critical.threads_in_module));
+            wake_up_interruptible(&wait_q);
+            msleep(100);
+
+        }
+    sysThrot_dev.critical.sentinel_head.task = NULL;
+    sysThrot_dev.critical.sentinel_head.to_wake = 0;
+    sysThrot_dev.critical.sentinel_head.next = NULL;
+    sysThrot_dev.critical.sentinel_tail.task = NULL;
+    sysThrot_dev.critical.sentinel_tail.to_wake = 0;
+    sysThrot_dev.critical.sentinel_tail.next = &sysThrot_dev.critical.sentinel_head;
+    SYS_AUDIT_LOG("Throttling turned OFF");
     return 0;
 }
 
@@ -390,7 +451,7 @@ void sysThrot_cleanup(void) {
     do{
         left=atomic_read(&sysThrot_dev.critical.threads_in_stub);
         if(left>0){
-            printk("%s: Waiting for %d threads to exit the stub before cleanup\n",MODNAME,left);
+            SYS_AUDIT_LOG("Waiting for %d threads to exit the stub before cleanup", left);
             msleep(100); 
         }
     }while(left>0);
@@ -406,322 +467,13 @@ void sysThrot_cleanup(void) {
     }
     destroy_sysThrot_store(sysThrot_dev.store);
     device_driver_cleanup();
-
-    printk("%s: shutting down\n",MODNAME);
+    SYS_AUDIT_LOG("shutting down");
+    sysThrot_log_cleanup();
+    printk("%s: module unloaded\n", MODNAME);
 }
 
 
 module_init(sysThrot_init);
 module_exit(sysThrot_cleanup);
-
-
-static const char *syscall_symbols[333] = {
-    "__x64_sys_read",
-    "__x64_sys_write",
-    "__x64_sys_open",
-    "__x64_sys_close",
-    "__x64_sys_stat",
-    "__x64_sys_fstat",
-    "__x64_sys_lstat",
-    "__x64_sys_poll",
-    "__x64_sys_lseek",
-    "__x64_sys_mmap",
-    "__x64_sys_mprotect",
-    "__x64_sys_munmap",
-    "__x64_sys_brk",
-    "__x64_sys_rt_sigaction",
-    "__x64_sys_rt_sigprocmask",
-    "__x64_sys_rt_sigreturn",
-    "__x64_sys_ioctl",
-    "__x64_sys_pread64",
-    "__x64_sys_pwrite64",
-    "__x64_sys_readv",
-    "__x64_sys_writev",
-    "__x64_sys_access",
-    "__x64_sys_pipe",
-    "__x64_sys_select",
-    "__x64_sys_sched_yield",
-    "__x64_sys_mremap",
-    "__x64_sys_msync",
-    "__x64_sys_mincore",
-    "__x64_sys_madvise",
-    "__x64_sys_shmget",
-    "__x64_sys_shmat",
-    "__x64_sys_shmctl",
-    "__x64_sys_dup",
-    "__x64_sys_dup2",
-    "__x64_sys_pause",
-    "__x64_sys_nanosleep",
-    "__x64_sys_getitimer",
-    "__x64_sys_alarm",
-    "__x64_sys_setitimer",
-    "__x64_sys_getpid",
-    "__x64_sys_sendfile",
-    "__x64_sys_socket",
-    "__x64_sys_connect",
-    "__x64_sys_accept",
-    "__x64_sys_sendto",
-    "__x64_sys_recvfrom",
-    "__x64_sys_sendmsg",
-    "__x64_sys_recvmsg",
-    "__x64_sys_shutdown",
-    "__x64_sys_bind",
-    "__x64_sys_getcwd",
-    "__x64_sys_chdir",
-    "__x64_sys_fchdir",
-    "__x64_sys_rename",
-    "__x64_sys_mkdir",
-    "__x64_sys_rmdir",
-    "__x64_sys_creat",
-    "__x64_sys_link",
-    "__x64_sys_unlink",
-    "__x64_sys_symlink",
-    "__x64_sys_readlink",
-    "__x64_sys_chmod",
-    "__x64_sys_fchmod",
-    "__x64_sys_chown",
-    "__x64_sys_fchown",
-    "__x64_sys_lchown",
-    "__x64_sys_umask",
-    "__x64_sys_gettimeofday",
-    "__x64_sys_getrlimit",
-    "__x64_sys_getrusage",
-    "__x64_sys_sysinfo",
-    "__x64_sys_times",
-    "__x64_sys_ptrace",
-    "__x64_sys_getuid",
-    "__x64_sys_syslog",
-    "__x64_sys_getgid",
-    "__x64_sys_setuid",
-    "__x64_sys_setgid",
-    "__x64_sys_geteuid",
-    "__x64_sys_getegid",
-    "__x64_sys_setpgid",
-    "__x64_sys_getppid",
-    "__x64_sys_getpgrp",
-    "__x64_sys_setsid",
-    "__x64_sys_setreuid",
-    "__x64_sys_setregid",
-    "__x64_sys_getgroups",
-    "__x64_sys_setgroups",
-    "__x64_sys_setresuid",
-    "__x64_sys_getresuid",
-    "__x64_sys_setresgid",
-    "__x64_sys_getresgid",
-    "__x64_sys_getpgid",
-    "__x64_sys_setfsuid",
-    "__x64_sys_setfsgid",
-    "__x64_sys_getsid",
-    "__x64_sys_capget",
-    "__x64_sys_capset",
-    "__x64_sys_rt_sigpending",
-    "__x64_sys_rt_sigtimedwait",
-    "__x64_sys_rt_sigqueueinfo",
-    "__x64_sys_rt_sigsuspend",
-    "__x64_sys_sigaltstack",
-    "__x64_sys_utime",
-    "__x64_sys_mknod",
-    "__x64_sys_uselib",
-    "__x64_sys_personality",
-    "__x64_sys_ustat",
-    "__x64_sys_statfs",
-    "__x64_sys_fstatfs",
-    "__x64_sys_sysfs",
-    "__x64_sys_getpriority",
-    "__x64_sys_setpriority",
-    "__x64_sys_sched_setparam",
-    "__x64_sys_sched_getparam",
-    "__x64_sys_sched_setscheduler",
-    "__x64_sys_sched_getscheduler",
-    "__x64_sys_sched_get_priority_max",
-    "__x64_sys_sched_get_priority_min",
-    "__x64_sys_sched_rr_get_interval",
-    "__x64_sys_mlock",
-    "__x64_sys_munlock",
-    "__x64_sys_mlockall",
-    "__x64_sys_munlockall",
-    "__x64_sys_vhangup",
-    "__x64_sys_modify_ldt",
-    "__x64_sys_pivot_root",
-    "__x64_sys__sysctl",
-    "__x64_sys_prctl",
-    "__x64_sys_arch_prctl",
-    "__x64_sys_adjtimex",
-    "__x64_sys_setrlimit",
-    "__x64_sys_chroot",
-    "__x64_sys_sync",
-    "__x64_sys_acct",
-    "__x64_sys_settimeofday",
-    "__x64_sys_mount",
-    "__x64_sys_umount2",
-    "__x64_sys_swapon",
-    "__x64_sys_swapoff",
-    "__x64_sys_reboot",
-    "__x64_sys_sethostname",
-    "__x64_sys_setdomainname",
-    "__x64_sys_iopl",
-    "__x64_sys_ioperm",
-    "__x64_sys_create_module",
-    "__x64_sys_init_module",
-    "__x64_sys_delete_module",
-    "__x64_sys_get_kernel_syms",
-    "__x64_sys_query_module",
-    "__x64_sys_quotactl",
-    "__x64_sys_nfsservctl",
-    "__x64_sys_getpmsg",
-    "__x64_sys_putpmsg",
-    "__x64_sys_afs_syscall",
-    "__x64_sys_tuxcall",
-    "__x64_sys_security",
-    "__x64_sys_gettid",
-    "__x64_sys_readahead",
-    "__x64_sys_setxattr",
-    "__x64_sys_lsetxattr",
-    "__x64_sys_fsetxattr",
-    "__x64_sys_getxattr",
-    "__x64_sys_lgetxattr",
-    "__x64_sys_fgetxattr",
-    "__x64_sys_listxattr",
-    "__x64_sys_llistxattr",
-    "__x64_sys_flistxattr",
-    "__x64_sys_removexattr",
-    "__x64_sys_lremovexattr",
-    "__x64_sys_fremovexattr",
-    "__x64_sys_tkill",
-    "__x64_sys_time",
-    "__x64_sys_futex",
-    "__x64_sys_sched_setaffinity",
-    "__x64_sys_sched_getaffinity",
-    "__x64_sys_set_thread_area",
-    "__x64_sys_io_setup",
-    "__x64_sys_io_destroy",
-    "__x64_sys_io_getevents",
-    "__x64_sys_io_submit",
-    "__x64_sys_io_cancel",
-    "__x64_sys_get_thread_area",
-    "__x64_sys_lookup_dcookie",
-    "__x64_sys_epoll_create",
-    "__x64_sys_epoll_ctl_old",
-    "__x64_sys_epoll_wait_old",
-    "__x64_sys_remap_file_pages",
-    "__x64_sys_getdents64",
-    "__x64_sys_set_tid_address",
-    "__x64_sys_restart_syscall",
-    "__x64_sys_semtimedop",
-    "__x64_sys_fadvise64",
-    "__x64_sys_timer_create",
-    "__x64_sys_timer_settime",
-    "__x64_sys_timer_gettime",
-    "__x64_sys_timer_getoverrun",
-    "__x64_sys_timer_delete",
-    "__x64_sys_clock_settime",
-    "__x64_sys_clock_gettime",
-    "__x64_sys_clock_getres",
-    "__x64_sys_clock_nanosleep",
-    "__x64_sys_exit_group",
-    "__x64_sys_epoll_wait",
-    "__x64_sys_epoll_ctl",
-    "__x64_sys_tgkill",
-    "__x64_sys_utimes",
-    "__x64_sys_vserver",
-    "__x64_sys_mbind",
-    "__x64_sys_set_mempolicy",
-    "__x64_sys_get_mempolicy",
-    "__x64_sys_mq_open",
-    "__x64_sys_mq_unlink",
-    "__x64_sys_mq_timedsend",
-    "__x64_sys_mq_timedreceive",
-    "__x64_sys_mq_notify",
-    "__x64_sys_mq_getsetattr",
-    "__x64_sys_kexec_load",
-    "__x64_sys_waitid",
-    "__x64_sys_add_key",
-    "__x64_sys_request_key",
-    "__x64_sys_keyctl",
-    "__x64_sys_ioprio_set",
-    "__x64_sys_ioprio_get",
-    "__x64_sys_inotify_init",
-    "__x64_sys_inotify_add_watch",
-    "__x64_sys_inotify_rm_watch",
-    "__x64_sys_migrate_pages",
-    "__x64_sys_openat",
-    "__x64_sys_mkdirat",
-    "__x64_sys_mknodat",
-    "__x64_sys_fchownat",
-    "__x64_sys_futimesat",
-    "__x64_sys_newfstatat",
-    "__x64_sys_unlinkat",
-    "__x64_sys_renameat",
-    "__x64_sys_linkat",
-    "__x64_sys_symlinkat",
-    "__x64_sys_readlinkat",
-    "__x64_sys_fchmodat",
-    "__x64_sys_faccessat",
-    "__x64_sys_pselect6",
-    "__x64_sys_ppoll",
-    "__x64_sys_unshare",
-    "__x64_sys_set_robust_list",
-    "__x64_sys_get_robust_list",
-    "__x64_sys_splice",
-    "__x64_sys_tee",
-    "__x64_sys_sync_file_range",
-    "__x64_sys_vmsplice",
-    "__x64_sys_move_pages",
-    "__x64_sys_utimensat",
-    "__x64_sys_epoll_pwait",
-    "__x64_sys_signalfd",
-    "__x64_sys_timerfd_create",
-    "__x64_sys_eventfd",
-    "__x64_sys_fallocate",
-    "__x64_sys_timerfd_settime",
-    "__x64_sys_timerfd_gettime",
-    "__x64_sys_accept4",
-    "__x64_sys_signalfd4",
-    "__x64_sys_eventfd2",
-    "__x64_sys_epoll_create1",
-    "__x64_sys_dup3",
-    "__x64_sys_pipe2",
-    "__x64_sys_inotify_init1",
-    "__x64_sys_preadv",
-    "__x64_sys_pwritev",
-    "__x64_sys_rt_tgsigqueueinfo",
-    "__x64_sys_perf_event_open",
-    "__x64_sys_recvmmsg",
-    "__x64_sys_fanotify_init",
-    "__x64_sys_fanotify_mark",
-    "__x64_sys_prlimit64",
-    "__x64_sys_name_to_handle_at",
-    "__x64_sys_open_by_handle_at",
-    "__x64_sys_clock_adjtime",
-    "__x64_sys_syncfs",
-    "__x64_sys_sendmmsg",
-    "__x64_sys_setns",
-    "__x64_sys_getcpu",
-    "__x64_sys_process_vm_readv",
-    "__x64_sys_process_vm_writev",
-    "__x64_sys_kcmp",
-    "__x64_sys_finit_module",
-    "__x64_sys_sched_setattr",
-    "__x64_sys_sched_getattr",
-    "__x64_sys_renameat2",
-    "__x64_sys_seccomp",
-    "__x64_sys_getrandom",
-    "__x64_sys_memfd_create",
-    "__x64_sys_kexec_file_load",
-    "__x64_sys_bpf",
-    "__x64_sys_execveat",
-    "__x64_sys_userfaultfd",
-    "__x64_sys_membarrier",
-    "__x64_sys_mlock2",
-    "__x64_sys_copy_file_range",
-    "__x64_sys_preadv2",
-    "__x64_sys_pwritev2",
-    "__x64_sys_pkey_mprotect",
-    "__x64_sys_pkey_alloc",
-    "__x64_sys_pkey_free",
-    "__x64_sys_statx"
-};
-
-
 
 

@@ -40,7 +40,7 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
             return sysThrot_turn_off();
         default:
             AUDIT
-            printk("%s: Invalid ioctl command\n", MODNAME);
+            SYS_AUDIT_LOG("Invalid ioctl command");
             return -EINVAL;
     }
 }
@@ -64,15 +64,15 @@ int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
 
     if (!ret){
         AUDIT  
-        printk("%s: Registered user with ID %d\n", MODNAME, *user_id_ptr);
+        SYS_AUDIT_LOG("Registered user with ID %d", *user_id_ptr);
         return 0;
     } else if (ret == -EEXIST) {
         AUDIT
-        printk("%s: User with ID %d is already registered\n", MODNAME, *user_id_ptr);
+        SYS_AUDIT_LOG("User with ID %d is already registered", *user_id_ptr);
         kfree(user_id_ptr);
      }else{
         AUDIT
-        printk("%s: Failed to register user with ID %d (err=%d)\n", MODNAME, *user_id_ptr, ret);
+        SYS_AUDIT_LOG("Failed to register user with ID %d (err=%d)", *user_id_ptr, ret);
         kfree(user_id_ptr);
     }
     return ret;
@@ -92,9 +92,9 @@ int sysThrot_deregister_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
     int ret = remove_user_from_store(sysThrot_dev.store, user_id_ptr);
     
     if (!ret)
-        printk("%s: Deregistered user with ID %d\n", MODNAME, *user_id_ptr);
+        SYS_AUDIT_LOG("Deregistered user with ID %d", *user_id_ptr);
     else
-        printk("%s: User with ID %d not registered\n", MODNAME, *user_id_ptr);
+        SYS_AUDIT_LOG("User with ID %d not registered", *user_id_ptr);
 
     kfree(user_id_ptr);
     return ret;
@@ -116,16 +116,16 @@ int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name)
     res= add_program_to_store(sysThrot_dev.store, user_id_ptr);
     if (!res){
         AUDIT  
-        printk("%s: Registered program with name %s\n", MODNAME, user_id_ptr);
+        SYS_AUDIT_LOG("Registered program with name %s", user_id_ptr);
         return 0;
     } else if (res == -EEXIST) {
         AUDIT
-        printk("%s: Program with name %s is already registered\n", MODNAME, user_id_ptr);
+        SYS_AUDIT_LOG("Program with name %s is already registered", user_id_ptr);
         kfree(user_id_ptr);
 
      }else{
         AUDIT
-        printk("%s: Failed to register program with name %s (err=%d)\n", MODNAME, user_id_ptr, res);
+          SYS_AUDIT_LOG("Failed to register program with name %s (err=%d)", user_id_ptr, res);
         kfree(user_id_ptr);
 
     }
@@ -148,17 +148,17 @@ int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_nam
     res= remove_program_from_store(sysThrot_dev.store, user_id_ptr);
     if (!res){
         AUDIT  
-        printk("%s: removed program with name %s\n", MODNAME, user_id_ptr);
+        SYS_AUDIT_LOG("Removed program with name %s", user_id_ptr);
         kfree(user_id_ptr);
         return 0;
     } else if (res == -EEXIST) {
         AUDIT
-        printk("%s: Program with name %s is not registered\n", MODNAME, user_id_ptr);
+        SYS_AUDIT_LOG("Program with name %s is not registered", user_id_ptr);
         kfree(user_id_ptr);
 
      }else{
         AUDIT
-        printk("%s: Failed to remove program with name %s (err=%d)\n", MODNAME, user_id_ptr, res);
+          SYS_AUDIT_LOG("Failed to remove program with name %s (err=%d)", user_id_ptr, res);
         kfree(user_id_ptr);
 
     }
