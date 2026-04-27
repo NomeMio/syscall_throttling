@@ -2,7 +2,7 @@ obj-m += sysThrot_module.o
 sysThrot_module-objs += sysThrot_store.o  sysThrot.o  sysThrot_ioctl.o  sysThrot_log.o
 
 
-#syscall_address = $(shell cat /sys/module/the_usctm/parameters/sys_call_table_address)
+#syscall_address = $(shell cat /sys/module/the_usctm/pa0rameters/sys_call_table_address)
 
 #sys_call_table_address=$(syscall_address)
 all: generate_syscalls_header

@@ -63,7 +63,7 @@ inline int check_if_registered(void);
 void stub(struct pt_regs *regs);
 int installProbe(int syscall_id);
 int removeProbe(int syscall_id);
-
+struct users_list_array* get_user_space_users_copy(void);
 int sysThrot_init(void);
 void sysThrot_cleanup(void);
 
@@ -471,6 +471,14 @@ void sysThrot_cleanup(void) {
     sysThrot_log_cleanup();
     printk("%s: module unloaded\n", MODNAME);
 }
+
+
+struct users_list_array* get_user_space_users_copy(){
+    return get_user_space_users_array_from_store(sysThrot_dev.store);
+}
+
+
+
 
 
 module_init(sysThrot_init);

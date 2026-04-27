@@ -52,23 +52,13 @@ int main(int argc, char** argv){
 
 	
 
-	char program_name[] = "a.out\0"; 
-	char program_name1[] = "client\0"; 
-	char program_name2[] = "a33.out\0";
-	char syscall_name[] = "__x64_sys_getpid\0";
 
-	register_program(program_name);
-	register_program(program_name1);
-	register_program(program_name2);
 	int pid = getpid();
 	get_pid();
-	register_syscall(syscall_name); 
-	register_syscall(syscall_name); 
+
 
 
 	worker_test();
-	deregister_syscall(syscall_name);
-	deregister_syscall(syscall_name);
 
 	/*
 	

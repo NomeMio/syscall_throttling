@@ -28,6 +28,7 @@
 #define sysThrot_IOC_DEREGISTER_SYSCALL _IOW(sysThrot_IOC_MAGIC, 6, TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL)
 #define sysThrot_IOC_TURN_ON _IO(sysThrot_IOC_MAGIC, 7)
 #define sysThrot_IOC_TURN_OFF _IO(sysThrot_IOC_MAGIC, 8)
+#define sysThrot_IOC_GET_REGISTERED_USERS _IOR(sysThrot_IOC_MAGIC, 9, struct users_list_array*)
 
 
 
@@ -91,7 +92,19 @@ struct sysThrot_driver
     struct timer_list timer;
 };
 
+struct users_list_array{
+    int *users;
+    int size;
+};
 
+struct programs_list_array{
+    char **programs;
+    int size;
+};
+struct syscall_list_array{
+    int *syscalls;
+    int size;
+};
 
 
 extern struct sysThrot_driver sysThrot_dev;
@@ -114,6 +127,9 @@ int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id)
 int sysThrot_turn_off(void);
 int sysThrot_turn_on(void);
 
+//struct programs_list_array* get_user_space_programs_copy();
+struct users_list_array *get_user_space_users_copy(void);
+//struct syscall_list_array* get_user_space_syscalls_copy();
 struct _sysThrot_Store;
 
 int init_sysThrot_store(struct _sysThrot_Store **store);
@@ -124,8 +140,10 @@ int find_user_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOC
 int add_program_to_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
 int remove_program_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
 int find_program_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
-int sysThrot_turn_on(void);
-int sysThrot_turn_off(void);
+struct programs_list_array * get_user_space_programs_array_from_store(struct _sysThrot_Store *store);
+struct users_list_array *get_user_space_users_array_from_store(struct _sysThrot_Store *store);
+
+
 
 int sysThrot_log_init(void);
 void sysThrot_log_cleanup(void);

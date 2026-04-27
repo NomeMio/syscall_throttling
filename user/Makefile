@@ -1,8 +1,13 @@
 compile_client: generate_syscalls_header
 	gcc -o client client.c -I./lib
+	gcc -o deregister deregister.c -I./lib
+	gcc -o register register.c -I./lib
 
 
 
+clean:
+	rm -f client
+	rm -f lib/syscalls.h
 
 load_sys_calls:
 	rm -f sys_calls_symbols.txt
