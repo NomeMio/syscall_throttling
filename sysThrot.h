@@ -127,9 +127,9 @@ int sysThrot_deregister_syscall(TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL syscall_id)
 int sysThrot_turn_off(void);
 int sysThrot_turn_on(void);
 
-//struct programs_list_array* get_user_space_programs_copy();
 struct users_list_array *get_user_space_users_copy(void);
-//struct syscall_list_array* get_user_space_syscalls_copy();
+
+
 struct _sysThrot_Store;
 
 int init_sysThrot_store(struct _sysThrot_Store **store);

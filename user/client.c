@@ -13,8 +13,6 @@
 
 
 
-
-
 void get_pid() {
 	pid_t pid = getpid();
 	printf("Current PID: %d\n", pid);
@@ -27,7 +25,7 @@ void get_pid() {
 void* worker_job(void *arg) {
 	int pid = getpid();
 	return NULL;
-}	
+}
 
 void worker_test(){
 	pthread_t threads[N];
@@ -37,8 +35,6 @@ void worker_test(){
 			exit(EXIT_FAILURE);
 		}
 	}
-	//sleep(2);
-	//turn_off_monitor();
 	for(int i=0; i<N; i++){
 		pthread_join(threads[i], NULL);
 	}
@@ -47,30 +43,23 @@ void worker_test(){
 
 
 
+#define MAX_USERS 256
+
 int main(int argc, char** argv){
-       
 
-	
-
-
-	int pid = getpid();
 	get_pid();
-
-
-
+	double_open_test();	
 	worker_test();
 
-	/*
-	
-	for(int i=0; i< SUPPORTED_SYSCALLS; i++){
-		register_syscall(syscall_symbols[i]);
-		deregister_syscall(syscall_symbols[i]);
+	int users[MAX_USERS];
+	int count = get_registered_users(users, MAX_USERS);
+	if (count < 0) {
+		fprintf(stderr, "Failed to get registered users\n");
+	} else {
+		printf("Registered users (%d):\n", count);
+		for (int i = 0; i < count; i++)
+			printf("  UID: %d\n", users[i]);
 	}
-
-	*/
-
 
 	return 0;
-	
-	}
-
+}

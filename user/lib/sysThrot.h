@@ -17,7 +17,12 @@ static const char *syscall_symbols[];
 #define sysThrot_IOC_DEREGISTER_SYSCALL _IOW(sysThrot_IOC_MAGIC, 6, TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL)
 #define sysThrot_IOC_TURN_ON _IO(sysThrot_IOC_MAGIC, 7)
 #define sysThrot_IOC_TURN_OFF _IO(sysThrot_IOC_MAGIC, 8)
+#define sysThrot_IOC_GET_REGISTERED_USERS _IOR(sysThrot_IOC_MAGIC, 9, struct users_list_array*)
 
+struct users_list_array {
+    int *users;
+    int size;
+};
 
 #define DEVICE_PATH "/dev/sysThrot_dev"
 
@@ -130,4 +135,64 @@ int register_program(const char* program_name) {
 	printf("Ioctl command sent successfully for registering program %s\n", program_name);
 	close(fd);
 	return 0;
+}
+
+int register_user(int user_id) {
+	int fd = open(DEVICE_PATH, O_RDWR);
+	if (fd < 0) {
+		perror("Failed to open device");
+		return -1;
+	}
+
+	if (ioctl(fd, sysThrot_IOC_REGISTER_USER, &user_id) < 0) {
+		perror("Failed to send ioctl command");
+		close(fd);
+		return -1;
+	}
+
+	printf("Ioctl command sent successfully for registering user ID %d\n", user_id);
+	close(fd);
+	return 0;
+}
+
+int double_open_test() {
+	int fd1 = open(DEVICE_PATH, O_RDWR);
+	if (fd1 < 0) {
+		perror("Failed to open device the first time");
+		return -1;
+	}
+
+	int fd2 = open(DEVICE_PATH, O_RDWR);
+	if (fd2 < 0) {
+		perror("Failed to open device the second time");
+		close(fd1);
+		return -1;
+	}
+
+	printf("Device opened successfully twice (fd1: %d, fd2: %d)\n", fd1, fd2);
+	close(fd1);
+	close(fd2);
+	return 0;
+}
+
+
+int get_registered_users(int *buf, int buf_size) {
+	struct users_list_array arr;
+	arr.users = buf;
+	arr.size = buf_size;
+
+	int fd = open(DEVICE_PATH, O_RDWR);
+	if (fd < 0) {
+		perror("Failed to open device");
+		return -1;
+	}
+
+	if (ioctl(fd, sysThrot_IOC_GET_REGISTERED_USERS, &arr) < 0) {
+		perror("Failed to get registered users");
+		close(fd);
+		return -1;
+	}
+
+	close(fd);
+	return arr.size;
 }

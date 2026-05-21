@@ -12,32 +12,65 @@
 
 
 
-
+int sysThrot_get_users(unsigned long arg);
 extern int installProbe(int syscall_id);
 extern int removeProbe(int syscall_id);
 
 #define DEVICE_NAME "sysThrot_dev"
 
 
+int check_root_user(void){
+    if (current_uid().val == 0) {
+        return 1; // User is root
+    }
+    return 0; // User is not root
+}
+
 
 long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
     switch(cmd) {
         case sysThrot_IOC_REGISTER_USER:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_register_user((TYPE_OF_DATA_PASSED_TO_IOCTL_USER)arg);
         case sysThrot_IOC_DEREGISTER_USER:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_deregister_user((TYPE_OF_DATA_PASSED_TO_IOCTL_USER)arg);
         case sysThrot_IOC_REGISTER_PROGRAM:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_register_program((TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM)arg);
         case sysThrot_IOC_DEREGISTER_PROGRAM:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_deregister_program((TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM)arg);
         case sysThrot_IOC_REGISTER_SYSCALL:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_register_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL )arg);
         case sysThrot_IOC_DEREGISTER_SYSCALL:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_deregister_syscall((TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL )arg);
         case sysThrot_IOC_TURN_ON:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_turn_on();
         case sysThrot_IOC_TURN_OFF:
+            if (!check_root_user()) {
+                return -EPERM;
+            }
             return sysThrot_turn_off();
+        case sysThrot_IOC_GET_REGISTERED_USERS: 
+            return sysThrot_get_users(arg);
         default:
             AUDIT
             SYS_AUDIT_LOG("Invalid ioctl command");
@@ -45,6 +78,45 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
     }
 }
 
+
+
+int sysThrot_get_users(unsigned long arg){
+            struct users_list_array __user *uarg = (struct users_list_array __user *)arg;
+            struct users_list_array kuarg;
+            struct users_list_array *kresult;
+
+            if (copy_from_user(&kuarg, uarg, sizeof(struct users_list_array)))
+                return -EFAULT;
+
+            kresult = get_user_space_users_copy();
+            if (!kresult)
+                return -ENOMEM;
+
+            if (kresult->size > kuarg.size) {
+                put_user(kresult->size, &uarg->size);
+                kfree(kresult->users);
+                kfree(kresult);
+                return -ENOSPC;
+            }
+
+            if (copy_to_user(kuarg.users, kresult->users, kresult->size * sizeof(int))) {
+                kfree(kresult->users);
+                kfree(kresult);
+                return -EFAULT;
+            }
+
+            if (put_user(kresult->size, &uarg->size)) {
+                kfree(kresult->users);
+                kfree(kresult);
+                return -EFAULT;
+            }
+
+            AUDIT
+            SYS_AUDIT_LOG("Returned list of %d registered users", kresult->size);
+            kfree(kresult->users);
+            kfree(kresult);
+            return 0;
+}
 
 
 int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){

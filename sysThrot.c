@@ -72,12 +72,28 @@ extern void stub_trampoline(void);
 static const char *syscall_symbols[];
 
 
+static atomic_t dev_available = ATOMIC_INIT(1);
+int sysThrot_open(struct inode *inode, struct file *flip){ //TODO: stuff to check for starvation
+    //struct sysThrot_driver *dev = &sysThrot_dev; 
+    if (! atomic_dec_and_test (&dev_available)) {
+    atomic_inc(&dev_available);
+    return -EBUSY; /* already open */
+    }
+    return 0;
+}
+
+int sysThrot_release(struct inode *inode, struct file *flip){
+    atomic_inc(&dev_available);
+    return 0;
+}
 
 //Device driver stuff
 
 const struct file_operations fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = sysThrot_ioctl,
+    .open = sysThrot_open,
+    .release = sysThrot_release,
 };
 struct sysThrot_driver sysThrot_dev = {
     .fops = fops,
