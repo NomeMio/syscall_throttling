@@ -25,10 +25,9 @@ int main(int argc, char** argv){
 	register_user(user);
 
 	//register_program(program_name);
-	//register_program(program_name1);
+	register_program(program_name1);
 	//register_program(program_name2);
 
-	register_syscall(syscall_name); 
 	register_syscall(syscall_name); 
 
 

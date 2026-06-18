@@ -1,5 +1,6 @@
 obj-m += sysThrot_module.o
 sysThrot_module-objs += sysThrot_store.o  sysThrot.o  sysThrot_ioctl.o  sysThrot_log.o
+ccflags-y += -I$(src)/lib
 
 
 #syscall_address = $(shell cat /sys/module/the_usctm/pa0rameters/sys_call_table_address)
@@ -24,15 +25,15 @@ load_sys_calls:
 	cat /proc/kallsyms | grep -oE ' __x64_sys_[^ ]*' >> sys_calls_symbols.txt
 
 generate_syscalls_header: load_sys_calls
-	rm -f syscalls.h
-	@echo "#ifndef SYSCALLS_H" > syscalls.h
-	@echo "#define SYSCALLS_H" >> syscalls.h
-	@echo "" >> syscalls.h
-	@echo "#define SUPPORTED_SYSCALLS $$(wc -l < sys_calls_symbols.txt)" >> syscalls.h
-	@echo "" >> syscalls.h
-	@echo "static const char *syscall_symbols[] = {" >> syscalls.h
-	@awk '{gsub(/^[ \t]+|[ \t]+$$/, ""); print "\t\"" $$0 "\","}' sys_calls_symbols.txt | sed '$$s/,$$//' >> syscalls.h
-	@echo "};" >> syscalls.h
-	@echo "" >> syscalls.h
-	@echo "#endif" >> syscalls.h
+	rm -f lib/syscalls.h
+	@echo "#ifndef SYSCALLS_H" > lib/syscalls.h
+	@echo "#define SYSCALLS_H" >> lib/syscalls.h
+	@echo "" >> lib/syscalls.h
+	@echo "#define SUPPORTED_SYSCALLS $$(wc -l < sys_calls_symbols.txt)" >> lib/syscalls.h
+	@echo "" >> lib/syscalls.h
+	@echo "static const char *syscall_symbols[] = {" >> lib/syscalls.h
+	@awk '{gsub(/^[ \t]+|[ \t]+$$/, ""); print "\t\"" $$0 "\","}' sys_calls_symbols.txt | sed '$$s/,$$//' >> lib/syscalls.h
+	@echo "};" >> lib/syscalls.h
+	@echo "" >> lib/syscalls.h
+	@echo "#endif" >> lib/syscalls.h
 	rm -f sys_calls_symbols.txt

@@ -23,20 +23,10 @@
 #include <linux/ftrace.h>
 #include <linux/delay.h>
 #include <linux/cred.h>
-
-
-
-
-//#include "./include/vtpmo.h"
-#include "./sysThrot.h"
-
-
-
-
-
-
-
-
+#include "sysThrot.h"
+#include "sysThrot_store.h"
+#include "sysThrot_ioctl.h"
+#include "sysThrot_queue.h"
 
 
 
@@ -54,8 +44,8 @@ module_param(max_calls_monitor, ulong, 0660);
 
 int device_driver_init(void);
 int device_driver_cleanup(void);
-
-
+int sysThrot_init(void);
+void sysThrot_cleanup(void);
 
 
 void timer_callback(struct timer_list *timer);
@@ -63,17 +53,19 @@ inline int check_if_registered(void);
 void stub(struct pt_regs *regs);
 int installProbe(int syscall_id);
 int removeProbe(int syscall_id);
+
+
 struct users_list_array* get_user_space_users_copy(void);
-int sysThrot_init(void);
-void sysThrot_cleanup(void);
+
 
 extern void stub_trampoline(void);
 
-static const char *syscall_symbols[];
+static const char *syscall_symbols[];//??
 
 
-static atomic_t dev_available = ATOMIC_INIT(1);
-int sysThrot_open(struct inode *inode, struct file *flip){ //TODO: stuff to check for starvation
+
+static atomic_t dev_available = ATOMIC_INIT(1); //For now only one user at time can open the device, but it should be enough for our use case, if needed it can be easily changed to allow more concurrent users
+int sysThrot_open(struct inode *inode, struct file *flip){ 
     //struct sysThrot_driver *dev = &sysThrot_dev; 
     if (! atomic_dec_and_test (&dev_available)) {
     atomic_inc(&dev_available);
@@ -87,7 +79,9 @@ int sysThrot_release(struct inode *inode, struct file *flip){
     return 0;
 }
 
+
 //Device driver stuff
+
 
 const struct file_operations fops = {
     .owner = THIS_MODULE,
@@ -105,20 +99,18 @@ struct sysThrot_driver sysThrot_dev = {
 inline int check_if_registered(void){
     struct task_struct *task = current;
     if (find_program_in_store(sysThrot_dev.store, task->comm) ==  0) {
-        AUDIT
-        SYS_AUDIT_LOG("Intercepted syscall from process %s (PID %d)", task->comm, task_pid_nr(task));
+        LOG(LOG_CHECK_IF_LIMITED,"Intercepted syscall from process %s (PID %d)", task->comm, task_pid_nr(task));
         return 1;
     } else {
         int uid = __kuid_val(current_uid());
-
         if (find_user_in_store(sysThrot_dev.store, &uid) == 0) {
-            AUDIT
-            SYS_AUDIT_LOG("Intercepted syscall from user with ID %u", uid);
+            LOG(LOG_CHECK_IF_LIMITED,"Intercepted syscall from user with ID %u", uid);
             return 1;
         }
     }
     return -1;
 }
+
 
 
 
@@ -135,33 +127,19 @@ void stub(struct pt_regs *regs) {
 
     unsigned long flags;
     int wakeup_flag=0;
-    //TODO: si potrebbe fare un meccanismo di sync/cons migliore
-    spin_lock_irqsave(&sysThrot_dev.critical.queue_lock, flags);
+
     int tokens_left = atomic_dec_return(&sysThrot_dev.critical.current_epoch_tokens);
     if (tokens_left >= 0) {
-            spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);
         goto end;
     }
-    struct task_struct *task = current;
-    struct _queue_elem *elem = kmalloc(sizeof(struct _queue_elem), GFP_KERNEL);
-    if (!elem) {
-        spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);
+
+   int res=add_to_queue(&wakeup_flag);
+    if (res != 0) {
         goto end;
     }
-    elem->task = task;
-    elem->to_wake = &wakeup_flag;
-    elem->was_interrupted = 0;
-    elem->next = NULL;
-    sysThrot_dev.critical.sentinel_tail.next->next = elem;
-    sysThrot_dev.critical.sentinel_tail.next = elem;
-    spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);   
-    int res=wait_event_interruptible(wait_q, wakeup_flag == 1 || sysThrot_dev.working == 0);
-    if (res == -ERESTARTSYS) {
-        spin_lock_irqsave(&sysThrot_dev.critical.interrupt_lock, flags);
-        elem->was_interrupted = 1;
-        spin_unlock_irqrestore(&sysThrot_dev.critical.interrupt_lock, flags);
-        SYS_AUDIT_LOG("wait interrupted by signal for process %s (PID %d)", task->comm, task_pid_nr(task));
-    }
+
+    wait_event(wait_q, wakeup_flag == 1 || sysThrot_dev.working == 0);//interruptable per forza, altrimenti è troppo forte
+
     end:
     atomic_dec(&sysThrot_dev.critical.threads_in_module);
     global_end:
@@ -201,40 +179,39 @@ extern void stub_trampoline(void);
 
 
 int installProbe(int syscall_id){
-    struct kprobe kp;
-    unsigned long addr_sys;
-    if (sysThrot_dev.syscall_addresses[syscall_id] != 0) 
-        goto alredy_probed;
-    //SYS_AUDIT_LOG("Installing kprobe for syscall (ID %d) registration", syscall_id);
     if (syscall_id < 0 || syscall_id >= SUPPORTED_SYSCALLS)
         return -EINVAL;
 
-    kp.symbol_name = syscall_symbols[syscall_id];
-   
     if (sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8))) {
-        //SYS_AUDIT_LOG("Syscall (ID %d: %s) is already registered", syscall_id, syscall_symbols[syscall_id]);
+        LOG(LOG_CORE,"Syscall (ID %d: %s) is already probed for registration", syscall_id, syscall_symbols[syscall_id]);
         return -EEXIST;
     }
 
+    if (sysThrot_dev.syscall_addresses[syscall_id] != 0) 
+        goto alredy_probed;
+    
+    
+    struct kprobe kp;
+    unsigned long addr_sys;
+    kp.symbol_name = syscall_symbols[syscall_id];
+    
     int result = register_kprobe(&kp);
     if (result) {
-        SYS_AUDIT_LOG("%s: Failed to register kprobe for syscall (ID %d: %s) registration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], result);
+        LOG(LOG_CORE,"%s: Failed to register kprobe for syscall (ID %d: %s) registration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], result);
         return result;
     }  
-    //sarebbe da sistemare per poi metterlo apposto
+
     addr_sys = (unsigned long)kp.addr;
     unregister_kprobe(&kp);
     kp.addr= 0;
     sysThrot_dev.syscall_addresses[syscall_id]=addr_sys;
-    AUDIT
-    SYS_AUDIT_LOG("Probed syscall (ID %d: %s) at address 0x%lx for registration", syscall_id, syscall_symbols[syscall_id], addr_sys);
+    LOG(LOG_CORE,"Probed syscall (ID %d: %s) at address 0x%lx for registration", syscall_id, syscall_symbols[syscall_id], addr_sys);
 
     goto end;
     
     alredy_probed:
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
-        AUDIT
-        SYS_AUDIT_LOG("Syscall (ID %d: %s) is already probed at address 0x%lx for registration", syscall_id, syscall_symbols[syscall_id], addr_sys);
+        LOG(LOG_CORE,"Syscall (ID %d: %s) is already probed at address 0x%lx for registration", syscall_id, syscall_symbols[syscall_id], addr_sys);
     end:
         int INTS_LEN=5;
         char call_instruction[INTS_LEN];
@@ -254,42 +231,39 @@ int installProbe(int syscall_id){
 
 
 int removeProbe(int syscall_id){
-    struct kprobe kp;
-    unsigned long addr_sys;
-    
+    if (syscall_id < 0 || syscall_id >= SUPPORTED_SYSCALLS)
+        return -EINVAL; 
+    if( (sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8)))==0 )
+            return -EEXIST; // syscall is not probed for deregistration
+
+        
     if (sysThrot_dev.syscall_addresses[syscall_id] !=  0)
         goto alredy_probed;
-    if (syscall_id < 0 || syscall_id >= SUPPORTED_SYSCALLS)
-        return -EINVAL;
-    if( (sysThrot_dev.syscall_presence_bitmap[syscall_id/8] & (1 << (syscall_id % 8)))==0 )
-            return -EINVAL; 
+
+    struct kprobe kp;
+    unsigned long addr_sys;
     kp.symbol_name = syscall_symbols[syscall_id];
     int result = register_kprobe(&kp);
     if (result) {
-        SYS_AUDIT_LOG("%s: Failed to register kprobe for syscall (ID %d: %s) deregistration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], result);
+        LOG(LOG_CORE,"%s: Failed to register kprobe for syscall (ID %d: %s) deregistration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], result);
         return -1;
     }   
-    //sarebbe da sistemare per poi metterlo apposto
     addr_sys = (unsigned long)kp.addr;
     sysThrot_dev.syscall_addresses[syscall_id]=addr_sys;
     unregister_kprobe(&kp);
-    SYS_AUDIT_LOG("Probed syscall (ID %d: %s) at address 0x%lx for deregistration", syscall_id, syscall_symbols[syscall_id], addr_sys);
-
+    LOG(LOG_CORE,"Probed syscall (ID %d: %s) at address 0x%lx for deregistration", syscall_id, syscall_symbols[syscall_id], addr_sys);
     goto end;
     alredy_probed:
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
     end:
         kp.addr= 0;
         int INTS_LEN=5;
-        
         char call_instruction[INTS_LEN];
-        
         call_instruction[0]=0x0f; // putting multi NOP, putting 5 normale nops sometimes trigger some strange error's with ftrace, TODO check normal NOP.
         call_instruction[1]=0x1f;
         call_instruction[2]=0x44;
         call_instruction[3]=0x00;
         call_instruction[4]=0x00;
-        
         unsigned long cr0, cr4;
         preempt_disable();
         being_sys_call_hacking(&cr0, &cr4);
@@ -309,19 +283,19 @@ int device_driver_init(void){
     result=alloc_chrdev_region(&dev, minor_number, 1, DEVICE_NAME);
     major_number=MAJOR(dev);
     if (result < 0) {
-        printk(KERN_ALERT "%s: Failed to allocate a major number\n", MODNAME);
+        LOG(LOG_CORE,"%s: Failed to allocate a major number\n", MODNAME);
         return result;
     }
     sysThrot_dev.device_class=class_create(DEVICE_NAME);
     if(IS_ERR(sysThrot_dev.device_class)){
         unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        printk(KERN_ALERT "%s: Failed to create device class\n", MODNAME);
+        LOG(LOG_CORE,"%s: Failed to create device class\n", MODNAME);
         return PTR_ERR(sysThrot_dev.device_class);
     }
     if(device_create(sysThrot_dev.device_class, NULL, MKDEV(major_number, minor_number), NULL, DEVICE_NAME) == NULL){
         class_destroy(sysThrot_dev.device_class);
         unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        printk(KERN_ALERT "%s: Failed to create device\n", MODNAME);
+        LOG(LOG_CORE,"%s: Failed to create device\n", MODNAME);
         return -1;
     }
     cdev_init(&sysThrot_dev.cdev, &sysThrot_dev.fops);
@@ -331,7 +305,7 @@ int device_driver_init(void){
         device_destroy(sysThrot_dev.device_class, MKDEV(major_number, minor_number));
         class_destroy(sysThrot_dev.device_class);
         unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        printk(KERN_ALERT "%s: Failed to add cdev\n", MODNAME);
+        LOG(LOG_CORE,"%s: Failed to add cdev\n", MODNAME);
     }
     return result;
 }
@@ -348,34 +322,15 @@ int device_driver_cleanup(void){
  
 void timer_callback(struct timer_list *timer){
         int new_epoche_tokens=sysThrot_dev.max_syscalls_for_epoch;
-        unsigned long flags;
-        spin_lock_irqsave(&sysThrot_dev.critical.queue_lock, flags);
-        struct _queue_elem *elem = sysThrot_dev.critical.sentinel_head.next;
         
-        wake_up_loop:
-            if (elem == NULL) {
-                sysThrot_dev.critical.sentinel_tail.next = &sysThrot_dev.critical.sentinel_head;
-                goto end_wake_up_loop;
-            }
-            if (new_epoche_tokens <= 0) {
-                goto end_wake_up_loop;
-            }
-            long flags_interrupt;
-            spin_lock_irqsave(&sysThrot_dev.critical.interrupt_lock, flags_interrupt);
-            if(elem->was_interrupted==0)
-                *(elem->to_wake) = 1;
-            spin_unlock_irqrestore(&sysThrot_dev.critical.interrupt_lock, flags_interrupt);
-            struct _queue_elem *to_free = elem;
-            elem = elem->next;
-            kfree(to_free);
-            sysThrot_dev.critical.sentinel_head.next = elem;
-            new_epoche_tokens--;
-            goto wake_up_loop;
-        end_wake_up_loop:
-            wake_up_interruptible(&wait_q);
-            atomic_inc(&sysThrot_dev.critical.epoch);
-            atomic_set(&sysThrot_dev.critical.current_epoch_tokens, new_epoche_tokens);
-            spin_unlock_irqrestore(&sysThrot_dev.critical.queue_lock, flags);
+        int queued=unqueue(new_epoche_tokens);
+        /* ce qualcosa di molto grande che non va, se nello stesso momento finisce unqueue ed entra un altro thread
+        nello stub questo potrebbe andare in coda invece di essere servito subito se ci sono ancora posti.*/
+        new_epoche_tokens-=queued;
+        
+        wake_up_interruptible(&wait_q);
+        atomic_inc(&sysThrot_dev.critical.epoch);
+        atomic_set(&sysThrot_dev.critical.current_epoch_tokens, new_epoche_tokens); 
         if(sysThrot_dev.working) mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
 }
 
@@ -383,36 +338,27 @@ void timer_callback(struct timer_list *timer){
 int sysThrot_init(void) {
     printk("%s: initializing module\n", MODNAME);
     int ret;
-    ret = sysThrot_log_init();
-    if (ret < 0) {
-        printk(KERN_ALERT "%s: failed to initialize pseudo log\n", MODNAME);
-        return ret;
-    }
-    SYS_AUDIT_LOG("initializing");
-    SYS_AUDIT_LOG("%ld concurrent calls allowed", max_calls_monitor);
+    LOG(LOG_CORE,"%s: initializing", MODNAME);
+    LOG(LOG_CORE,"%ld concurrent calls allowed", max_calls_monitor);
     init_sysThrot_store(&sysThrot_dev.store);
     ret = device_driver_init();
     if (ret < 0) {
-        printk("%s: device driver init failed\n",MODNAME);
-        sysThrot_log_cleanup();
+        LOG(LOG_CORE,"%s: device driver init failed\n",MODNAME);
         return ret;
     }
     sysThrot_dev.working=0;
     sysThrot_dev.max_syscalls_for_epoch=max_calls_monitor;
-    spin_lock_init(&sysThrot_dev.critical.queue_lock);
-    spin_lock_init(&sysThrot_dev.critical.interrupt_lock);
     atomic_set(&sysThrot_dev.critical.threads_in_stub, 0);
     atomic_set(&sysThrot_dev.critical.epoch, 0);
     atomic_set(&sysThrot_dev.critical.current_epoch_tokens, 0);
     ret= sysThrot_turn_on();
     if (ret < 0) {
         device_driver_cleanup();
-        printk("%s: failed to turn on throttling\n",MODNAME);
-        sysThrot_log_cleanup();
+        LOG(LOG_CORE,"%s: failed to turn on throttling\n",MODNAME);
         return ret;
     }
-    printk("%s: module loaded\n", MODNAME);
-    SYS_AUDIT_LOG("module correctly mounted");
+    LOG(LOG_CORE,"%s: module loaded\n", MODNAME);
+    LOG(LOG_CORE,"module correctly mounted");
     return 0;
 }
 
@@ -420,22 +366,15 @@ int sysThrot_turn_on(void){
     int ret;
     if(sysThrot_dev.working==1)
         return -EALREADY; //non so cos altro usare
-    sysThrot_dev.critical.sentinel_head.task = NULL;
-    sysThrot_dev.critical.sentinel_head.to_wake = NULL;
-    sysThrot_dev.critical.sentinel_head.was_interrupted=0;
-    sysThrot_dev.critical.sentinel_head.next = NULL;
-    sysThrot_dev.critical.sentinel_tail.task = NULL;
-    sysThrot_dev.critical.sentinel_tail.to_wake = NULL;
-    sysThrot_dev.critical.sentinel_tail.was_interrupted=0;
-    sysThrot_dev.critical.sentinel_tail.next = &sysThrot_dev.critical.sentinel_head;
+    init_my_data_cache(sysThrot_dev.max_syscalls_for_epoch);
     timer_setup(&sysThrot_dev.timer, timer_callback, 0);
     ret=mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
     if (ret) {
-        printk("%s: Error in mod_timer\n", MODNAME);
+        LOG(LOG_CORE,"%s: Error in mod_timer\n", MODNAME);
         return ret;
     }
     sysThrot_dev.working=1;
-    SYS_AUDIT_LOG("Throttling turned ON");
+    LOG(LOG_CORE,"Throttling turned ON");
     return 0;
 }
 
@@ -443,21 +382,17 @@ int sysThrot_turn_on(void){
 int sysThrot_turn_off(void){
     if(sysThrot_dev.working==0)
         return -EALREADY; //non so cos altro usare#
-    timer_shutdown_sync(&sysThrot_dev.timer);   
     sysThrot_dev.working=0; 
+    timer_shutdown_sync(&sysThrot_dev.timer);   
+    set_wake_all_list();
     while(atomic_read(&sysThrot_dev.critical.threads_in_module)>0){
-            SYS_AUDIT_LOG("Waiting for %d threads to exit the module before turning off throttling", atomic_read(&sysThrot_dev.critical.threads_in_module));
+            LOG(LOG_CORE,"Waiting for %d threads to exit the module before turning off throttling", atomic_read(&sysThrot_dev.critical.threads_in_module));
             wake_up_interruptible(&wait_q);
             msleep(100);
 
         }
-    sysThrot_dev.critical.sentinel_head.task = NULL;
-    sysThrot_dev.critical.sentinel_head.to_wake = 0;
-    sysThrot_dev.critical.sentinel_head.next = NULL;
-    sysThrot_dev.critical.sentinel_tail.task = NULL;
-    sysThrot_dev.critical.sentinel_tail.to_wake = 0;
-    sysThrot_dev.critical.sentinel_tail.next = &sysThrot_dev.critical.sentinel_head;
-    SYS_AUDIT_LOG("Throttling turned OFF");
+    free_all_list();
+    LOG(LOG_CORE,"Throttling turned OFF");
     return 0;
 }
 
@@ -467,7 +402,7 @@ void sysThrot_cleanup(void) {
     do{
         left=atomic_read(&sysThrot_dev.critical.threads_in_stub);
         if(left>0){
-            SYS_AUDIT_LOG("Waiting for %d threads to exit the stub before cleanup", left);
+            LOG(LOG_CORE,"Waiting for %d threads to exit the stub before cleanup", left);
             msleep(100); 
         }
     }while(left>0);
@@ -483,9 +418,8 @@ void sysThrot_cleanup(void) {
     }
     destroy_sysThrot_store(sysThrot_dev.store);
     device_driver_cleanup();
-    SYS_AUDIT_LOG("shutting down");
-    sysThrot_log_cleanup();
-    printk("%s: module unloaded\n", MODNAME);
+    LOG(LOG_CORE,"shutting down");
+    LOG(LOG_CORE,"%s: module unloaded\n", MODNAME);
 }
 
 

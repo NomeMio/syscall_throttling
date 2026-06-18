@@ -4,7 +4,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/rcupdate.h>
-#include "sysThrot.h"
+#include "sysThrot_store.h"
 #define MODNAME "SYSTHROT"
 
 
@@ -61,9 +61,9 @@ struct users_list_array *get_user_space_users_array_from_store(struct _sysThrot_
 
 
 CuckooHash *create_map(void) {
-    CuckooHash *map = kmalloc(sizeof(*map), GFP_KERNEL);
+    CuckooHash *map = kzalloc(sizeof(*map), GFP_KERNEL);
     int i;
-
+    /* does kzmalloc already zeroes the memory? if so, this loop is redundant
     if (!map)
         return NULL;
 
@@ -73,7 +73,7 @@ CuckooHash *create_map(void) {
         map->table[0][i] = NULL;
         map->table[1][i] = NULL;
     }
-
+    */
     return map;
 }
 
@@ -210,7 +210,7 @@ int init_sysThrot_store(struct _sysThrot_Store **store){
 
     *store = kmalloc(sizeof(struct _sysThrot_Store), GFP_KERNEL);
     if (!*store) {
-        printk("%s: Failed to allocate memory for sysThrot store\n", MODNAME);
+        LOG(LOG_STORE,"%s: Failed to allocate memory for sysThrot store\n", MODNAME);
         return -ENOMEM;
     }
 
@@ -235,7 +235,7 @@ int destroy_sysThrot_store(struct _sysThrot_Store *store){
     CuckooHash *program_map;
 
     if (!store) {
-        printk("%s: Invalid sysThrot store pointer\n", MODNAME);
+        LOG(LOG_STORE,"%s: Invalid sysThrot store pointer\n", MODNAME);
         return -EINVAL;
     }
 

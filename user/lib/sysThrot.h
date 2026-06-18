@@ -1,3 +1,5 @@
+#ifndef USER_SYS_THROT_H
+#define USER_SYS_THROT_H
 
 #include "./syscalls.h"
 #define sysThrot_IOC_MAGIC '-'
@@ -196,3 +198,5 @@ int get_registered_users(int *buf, int buf_size) {
 	close(fd);
 	return arr.size;
 }
+
+#endif
