@@ -13,7 +13,6 @@
 
 
 
-int sysThrot_get_users(unsigned long arg);
 extern int installProbe(int syscall_id);
 extern int removeProbe(int syscall_id);
 
@@ -70,8 +69,6 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
                 return -EPERM;
             }
             return sysThrot_turn_off();
-        case sysThrot_IOC_GET_REGISTERED_USERS: 
-            return sysThrot_get_users(arg);
         default:
             LOG(LOG_IOCTL,"SysThrot: Invalid ioctl command %d", cmd);
             return -EINVAL;
@@ -80,42 +77,6 @@ long int sysThrot_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
 
 
 
-int sysThrot_get_users(unsigned long arg){
-            struct users_list_array __user *uarg = (struct users_list_array __user *)arg;
-            struct users_list_array kuarg;
-            struct users_list_array *kresult;
-
-            if (copy_from_user(&kuarg, uarg, sizeof(struct users_list_array)))
-                return -EFAULT;
-
-            kresult = get_user_space_users_copy();
-            if (!kresult)
-                return -ENOMEM;
-
-            if (kresult->size > kuarg.size) {
-                put_user(kresult->size, &uarg->size);
-                kfree(kresult->users);
-                kfree(kresult);
-                return -ENOSPC;
-            }
-
-            if (copy_to_user(kuarg.users, kresult->users, kresult->size * sizeof(int))) {
-                kfree(kresult->users);
-                kfree(kresult);
-                return -EFAULT;
-            }
-
-            if (put_user(kresult->size, &uarg->size)) {
-                kfree(kresult->users);
-                kfree(kresult);
-                return -EFAULT;
-            }
-
-            LOG(LOG_IOCTL,"SysThrot: Returned list of %d registered users", kresult->size);
-            kfree(kresult->users);
-            kfree(kresult);
-            return 0;
-}
 
 
 int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){

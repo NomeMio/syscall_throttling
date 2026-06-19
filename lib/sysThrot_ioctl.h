@@ -16,7 +16,6 @@
 #define sysThrot_IOC_DEREGISTER_SYSCALL _IOW(sysThrot_IOC_MAGIC, 6, TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL)
 #define sysThrot_IOC_TURN_ON _IO(sysThrot_IOC_MAGIC, 7)
 #define sysThrot_IOC_TURN_OFF _IO(sysThrot_IOC_MAGIC, 8)
-#define sysThrot_IOC_GET_REGISTERED_USERS _IOR(sysThrot_IOC_MAGIC, 9, struct users_list_array*)
 
 
 

@@ -18,7 +18,7 @@ void get_pid() {
 	printf("Current PID: %d\n", pid);
 }
 
-#define N 50
+#define N 100
 
 
 
@@ -43,23 +43,11 @@ void worker_test(){
 
 
 
-#define MAX_USERS 256
-
 int main(int argc, char** argv){
 
 	get_pid();
-	double_open_test();	
+	double_open_test();
 	worker_test();
-
-	int users[MAX_USERS];
-	int count = get_registered_users(users, MAX_USERS);
-	if (count < 0) {
-		fprintf(stderr, "Failed to get registered users\n");
-	} else {
-		printf("Registered users (%d):\n", count);
-		for (int i = 0; i < count; i++)
-			printf("  UID: %d\n", users[i]);
-	}
 
 	return 0;
 }

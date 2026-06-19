@@ -1,5 +1,5 @@
 obj-m += sysThrot_module.o
-sysThrot_module-objs += sysThrot_store.o  sysThrot.o  sysThrot_ioctl.o  sysThrot_log.o
+sysThrot_module-objs += sysThrot_store.o  sysThrot.o  sysThrot_ioctl.o  sysThrot_log.o sysThrot_queue.o sysThrot_statmonitor.o
 ccflags-y += -I$(src)/lib
 
 
@@ -13,7 +13,7 @@ clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 
 load:
-	insmod sysThrot_module.ko  max_calls_monitor=20
+	insmod sysThrot_module.ko  max_calls_monitor=1
 
 remove:
 	rmmod sysThrot_module 

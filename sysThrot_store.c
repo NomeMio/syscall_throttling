@@ -56,8 +56,7 @@ int add_program_to_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_I
 int remove_program_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
 int find_program_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_id);
 
-struct programs_list_array  *get_user_space_programs_array_from_store(struct _sysThrot_Store *store);
-struct users_list_array *get_user_space_users_array_from_store(struct _sysThrot_Store *store);
+
 
 
 CuckooHash *create_map(void) {
@@ -444,97 +443,41 @@ int find_program_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_
 }
 
 
-struct users_list_array *get_user_space_users_array_from_store(struct _sysThrot_Store *store) {
+int get_all_users_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_USER *user_array, int *num_users){
     CuckooHash *map;
     int count = 0;
-    int *users;
-    struct users_list_array *arr;
-
-    /* Allocate max possible before entering RCU read section to avoid GFP_KERNEL inside it */
-    users = kmalloc_array(TABLE_SIZE * 2, sizeof(int), GFP_KERNEL);
-    if (!users)
-        return NULL;
 
     rcu_read_lock();
     map = rcu_dereference(store->syscall_user_map);
     for (int i = 0; i < TABLE_SIZE; i++) {
-        if (map->occupied[0][i])
-            users[count++] = *(int *)map->table[0][i];
-        if (map->occupied[1][i])
-            users[count++] = *(int *)map->table[1][i];
+        if (map->occupied[0][i]) {
+            user_array[count++] = *(int *)map->table[0][i];
+        }
+        if (map->occupied[1][i]) {
+            user_array[count++] = *(int *)map->table[1][i];
+        }
     }
     rcu_read_unlock();
 
-    arr = kmalloc(sizeof(struct users_list_array), GFP_KERNEL);
-    if (!arr) {
-        kfree(users);
-        return NULL;
-    }
-    arr->users = users;
-    arr->size = count;
-    return arr;
+    *num_users = count;
+    return 0;
 }
-
-struct programs_list_array *get_user_space_programs_array_from_store(struct _sysThrot_Store *store){
+int get_all_programs_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM *program_array, int *num_programs){ 
     CuckooHash *map;
-    struct programs_list_array *arr;
-    char **programs;
-    int arralen = 0;
-    int i;
+    int count = 0;
 
     rcu_read_lock();
     map = rcu_dereference(store->syscall_program_map);
-
-    for (i = 0; i < TABLE_SIZE; i++) {
-        if (map->occupied[0][i])
-            arralen++;
-        if (map->occupied[1][i])
-            arralen++;
-    }
-
-    programs = arralen ? kmalloc_array(arralen, sizeof(char *), GFP_KERNEL) : NULL;
-    if (arralen && !programs) {
-        rcu_read_unlock();
-        return NULL;
-    }
-
-    for (i = 0, arralen = 0; i < TABLE_SIZE; i++) {
+    for (int i = 0; i < TABLE_SIZE; i++) {
         if (map->occupied[0][i]) {
-            programs[arralen] = kstrdup((const char *)map->table[0][i], GFP_KERNEL);
-            if (!programs[arralen])
-                goto fail;
-            arralen++;
+            program_array[count++] = kstrdup((const char *)map->table[0][i], GFP_KERNEL);
         }
         if (map->occupied[1][i]) {
-            programs[arralen] = kstrdup((const char *)map->table[1][i], GFP_KERNEL);
-            if (!programs[arralen])
-                goto fail;
-            arralen++;
+            program_array[count++] = kstrdup((const char *)map->table[1][i], GFP_KERNEL);
         }
     }
-
     rcu_read_unlock();
 
-    arr = kmalloc(sizeof(struct programs_list_array), GFP_KERNEL);
-    if (!arr) {
-        for (i = 0; i < arralen; i++)
-            kfree(programs[i]);
-        kfree(programs);
-        return NULL;
-    }
-
-    arr->programs = programs;
-    arr->size = arralen;
-    return arr;
-
-fail:
-    rcu_read_unlock();
-    while (arralen > 0)
-        kfree(programs[--arralen]);
-    kfree(programs);
-    return NULL;
+    *num_programs = count;
+    return 0;
 }
-
-//void *get_user_space_users_copy(){}
-
-

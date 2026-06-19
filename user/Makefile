@@ -1,12 +1,17 @@
 compile_client: generate_syscalls_header
 	gcc -o client client.c -I./lib
-	gcc -o deregister deregister.c -I./lib
-	gcc -o register register.c -I./lib
+	gcc -o systhrot systhrot.c -I./lib
 
+register: systhrot
+	./systhrot register-user 1000
+	./systhrot register-program client
+	./systhrot register-syscall __x64_sys_getpid
 
+deregister: systhrot
+	./systhrot deregister-syscall __x64_sys_getpid
 
 clean:
-	rm -f client
+	rm -f client systhrot
 	rm -f lib/syscalls.h
 
 load_sys_calls:

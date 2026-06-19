@@ -27,6 +27,14 @@
 #include "sysThrot_store.h"
 #include "sysThrot_ioctl.h"
 #include "sysThrot_queue.h"
+#include "sysThrot_statmonitor.h"
+
+
+
+
+
+
+
 
 
 
@@ -61,7 +69,6 @@ struct users_list_array* get_user_space_users_copy(void);
 extern void stub_trampoline(void);
 
 static const char *syscall_symbols[];//??
-
 
 
 static atomic_t dev_available = ATOMIC_INIT(1); //For now only one user at time can open the device, but it should be enough for our use case, if needed it can be easily changed to allow more concurrent users
@@ -125,21 +132,24 @@ void stub(struct pt_regs *regs) {
         goto end;
     }
 
-    unsigned long flags;
     int wakeup_flag=0;
 
     int tokens_left = atomic_dec_return(&sysThrot_dev.critical.current_epoch_tokens);
     if (tokens_left >= 0) {
         goto end;
     }
+    ktime_t clock_in = ktime_to_ns(ktime_get());
+    
+    add_to_queue(&wakeup_flag);
+    
 
-   int res=add_to_queue(&wakeup_flag);
-    if (res != 0) {
-        goto end;
-    }
+    wait_event(wait_q, wakeup_flag == 1 || sysThrot_dev.working == 0);
 
-    wait_event(wait_q, wakeup_flag == 1 || sysThrot_dev.working == 0);//interruptable per forza, altrimenti è troppo forte
-
+    ktime_t clock_out = ktime_to_ns(ktime_get());
+    unsigned long delay_ns = clock_out - clock_in;
+    int syscall_id = regs->orig_ax;
+    sysThrot_add_blocked(syscall_id, delay_ns);
+    
     end:
     atomic_dec(&sysThrot_dev.critical.threads_in_module);
     global_end:
@@ -328,7 +338,8 @@ void timer_callback(struct timer_list *timer){
         nello stub questo potrebbe andare in coda invece di essere servito subito se ci sono ancora posti.*/
         new_epoche_tokens-=queued;
         
-        wake_up_interruptible(&wait_q);
+        wake_up(&wait_q);
+        update_epoch_stats();
         atomic_inc(&sysThrot_dev.critical.epoch);
         atomic_set(&sysThrot_dev.critical.current_epoch_tokens, new_epoche_tokens); 
         if(sysThrot_dev.working) mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
@@ -342,6 +353,7 @@ int sysThrot_init(void) {
     LOG(LOG_CORE,"%ld concurrent calls allowed", max_calls_monitor);
     init_sysThrot_store(&sysThrot_dev.store);
     ret = device_driver_init();
+    sysThrot_statmonitor_init();
     if (ret < 0) {
         LOG(LOG_CORE,"%s: device driver init failed\n",MODNAME);
         return ret;
@@ -366,7 +378,7 @@ int sysThrot_turn_on(void){
     int ret;
     if(sysThrot_dev.working==1)
         return -EALREADY; //non so cos altro usare
-    init_my_data_cache(sysThrot_dev.max_syscalls_for_epoch);
+    init_queue();
     timer_setup(&sysThrot_dev.timer, timer_callback, 0);
     ret=mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
     if (ret) {
@@ -384,14 +396,14 @@ int sysThrot_turn_off(void){
         return -EALREADY; //non so cos altro usare#
     sysThrot_dev.working=0; 
     timer_shutdown_sync(&sysThrot_dev.timer);   
-    set_wake_all_list();
+    wake_up_queue();
     while(atomic_read(&sysThrot_dev.critical.threads_in_module)>0){
             LOG(LOG_CORE,"Waiting for %d threads to exit the module before turning off throttling", atomic_read(&sysThrot_dev.critical.threads_in_module));
             wake_up_interruptible(&wait_q);
             msleep(100);
 
         }
-    free_all_list();
+    destroy_queue();
     LOG(LOG_CORE,"Throttling turned OFF");
     return 0;
 }
@@ -418,6 +430,8 @@ void sysThrot_cleanup(void) {
     }
     destroy_sysThrot_store(sysThrot_dev.store);
     device_driver_cleanup();
+    sysThrot_statmonitor_exit();
+
     LOG(LOG_CORE,"shutting down");
     LOG(LOG_CORE,"%s: module unloaded\n", MODNAME);
 }
