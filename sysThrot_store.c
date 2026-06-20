@@ -443,7 +443,7 @@ int find_program_in_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_
 }
 
 
-int get_all_users_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCTL_USER *user_array, int *num_users){
+int get_all_users_from_store(struct _sysThrot_Store *store, int *user_array, int *num_users){
     CuckooHash *map;
     int count = 0;
 
@@ -470,10 +470,10 @@ int get_all_programs_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASS
     map = rcu_dereference(store->syscall_program_map);
     for (int i = 0; i < TABLE_SIZE; i++) {
         if (map->occupied[0][i]) {
-            program_array[count++] = kstrdup((const char *)map->table[0][i], GFP_KERNEL);
+            program_array[count++] = kstrdup((const char *)map->table[0][i], GFP_ATOMIC);
         }
         if (map->occupied[1][i]) {
-            program_array[count++] = kstrdup((const char *)map->table[1][i], GFP_KERNEL);
+            program_array[count++] = kstrdup((const char *)map->table[1][i], GFP_ATOMIC);
         }
     }
     rcu_read_unlock();

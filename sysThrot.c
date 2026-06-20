@@ -63,8 +63,6 @@ int installProbe(int syscall_id);
 int removeProbe(int syscall_id);
 
 
-struct users_list_array* get_user_space_users_copy(void);
-
 
 extern void stub_trampoline(void);
 
@@ -72,7 +70,68 @@ static const char *syscall_symbols[];//??
 
 
 static atomic_t dev_available = ATOMIC_INIT(1); //For now only one user at time can open the device, but it should be enough for our use case, if needed it can be easily changed to allow more concurrent users
-int sysThrot_open(struct inode *inode, struct file *flip){ 
+#define MAX_STORE_USERS    256
+#define MAX_STORE_PROGRAMS 64
+
+static ssize_t sysThrot_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
+{
+    char *buf;
+    int  *users     = NULL;
+    char **programs = NULL;
+    int   num_users = 0, num_programs = 0;
+    int   len = 0;
+    const int buf_size = PAGE_SIZE * 4;
+    ssize_t ret;
+
+    buf = kmalloc(buf_size, GFP_KERNEL);
+    if (!buf)
+        return -ENOMEM;
+
+    users = kmalloc_array(MAX_STORE_USERS, sizeof(int), GFP_KERNEL);
+    if (!users) { ret = -ENOMEM; goto out; }
+
+    programs = kcalloc(MAX_STORE_PROGRAMS, sizeof(char *), GFP_KERNEL);
+    if (!programs) { ret = -ENOMEM; goto out; }
+    for (int i = 0; i < MAX_STORE_PROGRAMS; i++) {
+        programs[i] = kmalloc(TASK_COMM_LEN, GFP_KERNEL);
+        if (!programs[i]) { ret = -ENOMEM; goto out; }
+    }
+
+    scnprintf(buf + len, buf_size - len, "=== Syscall Throttling Module Status ===\n");
+    len += scnprintf(buf + len, buf_size - len, "Throttling is %s\n", sysThrot_dev.working ? "ON" : "OFF");
+    len += scnprintf(buf + len, buf_size - len, "Max syscalls per epoch: %lu\n", sysThrot_dev.max_syscalls_for_epoch);
+
+
+    get_all_users_from_store(sysThrot_dev.store, users, &num_users);
+    len += scnprintf(buf + len, buf_size - len, "=== Registered Users (%d) ===\n", num_users);
+    for (int i = 0; i < num_users; i++)
+        len += scnprintf(buf + len, buf_size - len, "  UID: %d\n", users[i]);
+
+    get_all_programs_from_store(sysThrot_dev.store, programs, &num_programs);
+    len += scnprintf(buf + len, buf_size - len, "\n=== Registered Programs (%d) ===\n", num_programs);
+    for (int i = 0; i < num_programs; i++)
+        len += scnprintf(buf + len, buf_size - len, "  %s\n", programs[i]);
+
+    len += scnprintf(buf + len, buf_size - len, "\n=== Monitored Syscalls ===\n");
+    for (int i = 0; i < SUPPORTED_SYSCALLS; i++) {
+        if (sysThrot_dev.syscall_presence_bitmap[i / 8] & (1 << (i % 8)))
+            len += scnprintf(buf + len, buf_size - len, "  [%d] %s\n", i, syscall_symbols[i]);
+    }
+
+    ret = simple_read_from_buffer(ubuf, count, ppos, buf, len);
+
+out:
+    if (programs) {
+        for (int i = 0; i < MAX_STORE_PROGRAMS; i++)
+            kfree(programs[i]);
+        kfree(programs);
+    }
+    kfree(users);
+    kfree(buf);
+    return ret;
+}
+
+int sysThrot_open(struct inode *inode, struct file *flip){
     //struct sysThrot_driver *dev = &sysThrot_dev; 
     if (! atomic_dec_and_test (&dev_available)) {
     atomic_inc(&dev_available);
@@ -91,10 +150,11 @@ int sysThrot_release(struct inode *inode, struct file *flip){
 
 
 const struct file_operations fops = {
-    .owner = THIS_MODULE,
+    .owner          = THIS_MODULE,
+    .read           = sysThrot_read,
     .unlocked_ioctl = sysThrot_ioctl,
-    .open = sysThrot_open,
-    .release = sysThrot_release,
+    .open           = sysThrot_open,
+    .release        = sysThrot_release,
 };
 struct sysThrot_driver sysThrot_dev = {
     .fops = fops,
@@ -435,12 +495,6 @@ void sysThrot_cleanup(void) {
     LOG(LOG_CORE,"shutting down");
     LOG(LOG_CORE,"%s: module unloaded\n", MODNAME);
 }
-
-
-struct users_list_array* get_user_space_users_copy(){
-    return get_user_space_users_array_from_store(sysThrot_dev.store);
-}
-
 
 
 
