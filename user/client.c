@@ -18,7 +18,7 @@ void get_pid() {
 	printf("Current PID: %d\n", pid);
 }
 
-#define N 100
+#define N 30
 
 
 

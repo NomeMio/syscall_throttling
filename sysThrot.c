@@ -192,7 +192,6 @@ void stub(struct pt_regs *regs) {
         goto end;
     }
 
-    int wakeup_flag=0;
 
     int tokens_left = atomic_dec_return(&sysThrot_dev.critical.current_epoch_tokens);
     if (tokens_left >= 0) {
@@ -200,11 +199,14 @@ void stub(struct pt_regs *regs) {
     }
     ktime_t clock_in = ktime_to_ns(ktime_get());
     
-    add_to_queue(&wakeup_flag);
+    int *wakeup_flag = add_to_queue();
     
-
-    wait_event(wait_q, wakeup_flag == 1 || sysThrot_dev.working == 0);
-
+    int result = wait_event_interruptible(wait_q, *wakeup_flag == 1 || sysThrot_dev.working == 0);
+    set_exited_flag(wakeup_flag);
+    if (result == -ERESTARTSYS) {
+        LOG(LOG_STUB,"Thread interrupted by signal while waiting in queue");
+        goto end;
+    }
     ktime_t clock_out = ktime_to_ns(ktime_get());
     unsigned long delay_ns = clock_out - clock_in;
     int syscall_id = regs->orig_ax;
@@ -398,11 +400,12 @@ void timer_callback(struct timer_list *timer){
         nello stub questo potrebbe andare in coda invece di essere servito subito se ci sono ancora posti.*/
         new_epoche_tokens-=queued;
         
-        wake_up(&wait_q);
+        wake_up_interruptible(&wait_q);
         update_epoch_stats();
         atomic_inc(&sysThrot_dev.critical.epoch);
         atomic_set(&sysThrot_dev.critical.current_epoch_tokens, new_epoche_tokens); 
         if(sysThrot_dev.working) mod_timer(&sysThrot_dev.timer, jiffies + msecs_to_jiffies(EPOCH_DURATION_MS));
+        free_junk();
 }
 
 

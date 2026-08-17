@@ -28,8 +28,8 @@ static void *my_seq_start(struct seq_file *s, loff_t *pos)
     spin_lock(&stats_lock);
 
     if (*pos == 0) {
-        seq_printf(s, "%-8s %-16s %-10s %-16s\n",
-                   "NR", "PEAK_DELAY(ms)", "PID", "COMMAND");
+        seq_printf(s, "%-8s %-10s %-10s %-10s %-16s %-10s %-16s\n",
+                   "NR","TOTAL BLOCKED", "MEAN BLOCKED","MEAN DELAY(ns)", "PEAK_DELAY(ms)", "PID", "COMMAND");
         seq_printf(s, "--------------------------------------------------------------------------------\n");
     }
 
@@ -88,11 +88,14 @@ static int my_seq_show(struct seq_file *s, void *v)
 
     struct syscall_entry *entry = (struct syscall_entry *)v;
     
-    seq_printf(s, "%-8u %-16lu %-10d %-16s\n",
+    seq_printf(s, "%-8u %-16lu %-10lu %-16lu\n",
                entry->syscall_id,
-               entry->stat.peak_delay_ns / 1000000,
-               entry->stat.peak_delay_pid,
-               entry->stat.peak_delay_comm);
+                entry->stat.total_blocked,
+                entry->stat.mean_blocked,
+                entry->stat.mean_delay_ns/1000000,
+                entry->stat.peak_delay_ns / 1000000,
+                entry->stat.peak_delay_pid,
+                entry->stat.peak_delay_comm);
                
     return 0;
 }
@@ -141,7 +144,11 @@ void sysThrot_add_blocked(unsigned int syscall_id, unsigned long delay_ns)
         new_entry = kmalloc(sizeof(*new_entry), GFP_ATOMIC);
         if (!new_entry)
             return;
-
+        atomic_set(&new_entry->stat.current_blocked, 0);
+        new_entry->stat.total_blocked = 0;
+        new_entry->stat.mean_blocked = 0;
+        new_entry->stat.mean_delay_ns = 0;
+        new_entry->stat.current_time_blocked = 0;
         new_entry->syscall_id = syscall_id;
         memset(&new_entry->stat, 0, sizeof(struct syscall_stat));
         INIT_LIST_HEAD(&new_entry->list);
@@ -161,6 +168,8 @@ void sysThrot_add_blocked(unsigned int syscall_id, unsigned long delay_ns)
             kfree(new_entry);
         }
     }
+    atomic_inc(&entry->stat.current_blocked);
+    entry->stat.current_time_blocked+=delay_ns;
 
     if (delay_ns > entry->stat.peak_delay_ns) {
         entry->stat.peak_delay_ns = delay_ns;
@@ -173,6 +182,8 @@ void sysThrot_add_blocked(unsigned int syscall_id, unsigned long delay_ns)
 
 void update_epoch_stats(void)
 {
+    //TODO: pessima syncro
+    spin_lock(&stats_lock);
     unsigned long total_blocked = atomic_xchg(&epoch_blocked, 0);
     peak_blocked = max(peak_blocked, total_blocked);
     if (mean_blocked == 0) {
@@ -180,6 +191,18 @@ void update_epoch_stats(void)
     } else {
         mean_blocked = (mean_blocked * 29 + total_blocked) / 30;
     }
+    struct list_head *entry_p = NULL;
+    list_for_each( entry_p, &syscall_list_head) {
+        struct syscall_entry *entry = list_entry(entry_p, struct syscall_entry, list);
+        unsigned long current_blocked = atomic_xchg(&entry->stat.current_blocked, 0);
+        entry->stat.total_blocked += current_blocked;
+        if (current_blocked > 0) {
+            entry->stat.mean_blocked = (entry->stat.mean_blocked * 29 + current_blocked) / 30;
+            entry->stat.mean_delay_ns = (entry->stat.mean_delay_ns * 29 + entry->stat.current_time_blocked) / 30;
+            entry->stat.current_time_blocked = 0;
+        }
+    }
+    spin_unlock(&stats_lock);
 }
 
 int sysThrot_statmonitor_init(void)

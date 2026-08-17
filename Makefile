@@ -13,7 +13,7 @@ clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 
 load:
-	insmod sysThrot_module.ko  max_calls_monitor=1
+	insmod sysThrot_module.ko  max_calls_monitor=5
 
 remove:
 	rmmod sysThrot_module 

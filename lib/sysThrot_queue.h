@@ -6,7 +6,8 @@
 #include "syscalls.h"
 #include "sysThrot.h"
 struct _queue_elem {
-    int *wake_up_flag;
+    int wake_up_flag;
+    int exited;
     struct list_head node;
 };
 
@@ -15,10 +16,13 @@ extern spinlock_t queue_lock;
 extern int epoche_max_elemesnts;
 extern int current_in_queue;
 
+
+void set_exited_flag(int *wakeup_flag);
 int init_queue(void);
-int add_to_queue(int *wake_up_flag);
+int* add_to_queue(void);
+void free_from_wakeup_flag(int *wakeup_flag);
 int unqueue(int n);
 int wake_up_queue(void);
 int destroy_queue(void);
-
+void free_junk(void) ;
 #endif

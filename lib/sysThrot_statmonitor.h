@@ -7,6 +7,11 @@
 
 struct syscall_stat {
     unsigned long peak_delay_ns;
+    unsigned long mean_delay_ns;
+    unsigned long mean_blocked;
+    atomic_t current_blocked;
+    unsigned long current_time_blocked;
+    unsigned long total_blocked;
     pid_t peak_delay_pid;
     char peak_delay_comm[TASK_COMM_LEN];
 };
