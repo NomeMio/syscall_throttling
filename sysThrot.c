@@ -181,7 +181,14 @@ inline int check_if_registered(void){
 
 
 
+/*  
+    threads stub is needed to decide if the module is desmountable
+    thread in module is needed to turn off compltely the module when asked, they are separated to avoid the  need to unook the syscall each time
+*/
 
+/*
+    Stats could be handled in a better way, but for now i dont care, ask professor if needed, performance and concurrency is not a priority.
+*/
 void stub(struct pt_regs *regs) {
     atomic_inc(&sysThrot_dev.critical.threads_in_stub);
     if(sysThrot_dev.working==0) {
@@ -199,8 +206,9 @@ void stub(struct pt_regs *regs) {
     }
     ktime_t clock_in = ktime_to_ns(ktime_get());
     
+    // La concorenza della coda é gestita dal codice della coda stessa, ritorna solo la condizione del wakeup
     int *wakeup_flag = add_to_queue();
-    
+    // TODO: I dont think the thundering herd effect is solved in this case,  waking up all threads on wake_up call. Maybe it's better to find another solution
     int result = wait_event_interruptible(wait_q, *wakeup_flag == 1 || sysThrot_dev.working == 0);
     set_exited_flag(wakeup_flag);
     if (result == -ERESTARTSYS) {
@@ -222,7 +230,7 @@ void stub(struct pt_regs *regs) {
 
 
 
-
+// its neceessary to save all registers that can get dirty, if not it crashes the whole kernel. To test it just eliminate the pushe and pop, and register read, it instantly corrupts
 asm(
 ".global stub_trampoline\n"
 "stub_trampoline:\n"
@@ -246,7 +254,8 @@ asm(
 "    popq %rdi\n"
 "    popq %rax\n"
 "    ret\n"        
-);
+)
+
 extern void stub_trampoline(void);
 
 
@@ -396,8 +405,6 @@ void timer_callback(struct timer_list *timer){
         int new_epoche_tokens=sysThrot_dev.max_syscalls_for_epoch;
         
         int queued=unqueue(new_epoche_tokens);
-        /* ce qualcosa di molto grande che non va, se nello stesso momento finisce unqueue ed entra un altro thread
-        nello stub questo potrebbe andare in coda invece di essere servito subito se ci sono ancora posti.*/
         new_epoche_tokens-=queued;
         
         wake_up_interruptible(&wait_q);
