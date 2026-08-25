@@ -13,12 +13,8 @@
 
 #define MODNAME "SYSTHROT"
 #define DEVICE_NAME "sysThrot_dev"
-#define EPOCH_DURATION_MS 10000
+#define EPOCH_DURATION_MS 1000
 #define sysThrot_IOC_MAGIC '-'
-
-
-
-static const char *syscall_symbols[];//??
 
 
 
@@ -74,7 +70,7 @@ int device_driver_cleanup(void);
 #define LOG_STORE 1<<7
 #define LOG_QUEUE 1<<8
 
-#define LOG_LEVEL (LOG_CORE| LOG_STORE |LOG_CHECK_IF_LIMITED |LOG_IOCTL | LOG_ADMIN_COMMANDS | LOG_STATS )
+#define LOG_LEVEL (LOG_CORE| LOG_STORE |LOG_IOCTL | LOG_ADMIN_COMMANDS | LOG_STATS )
 void sysThrot_log(const char *fmt, ...);
 
 #define LOG(level, ...) do { if (LOG_LEVEL & (level)) sysThrot_log(__VA_ARGS__); } while (0)

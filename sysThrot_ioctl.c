@@ -93,17 +93,14 @@ int sysThrot_register_user(TYPE_OF_DATA_PASSED_TO_IOCTL_USER user_id){
     }
     int ret = add_user_to_store(sysThrot_dev.store, user_id_ptr);
 
-
-    if (!ret){
+    if (!ret)
         LOG(LOG_IOCTL,"SysThrot: Registered user with ID %d", *user_id_ptr);
-        return 0;
-    } else if (ret == -EEXIST) {
+    else if (ret == -EEXIST)
         LOG(LOG_IOCTL,"SysThrot: User with ID %d is already registered", *user_id_ptr);
-        kfree(user_id_ptr);
-     }else{
+    else
         LOG(LOG_IOCTL,"SysThrot: Failed to register user with ID %d (err=%d)", *user_id_ptr, ret);
-        kfree(user_id_ptr);
-    }
+
+    kfree(user_id_ptr);
     return ret;
 }
 
@@ -136,24 +133,23 @@ int sysThrot_register_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_name)
         return -ENOMEM;
     }
     int res=strncpy_from_user(user_id_ptr, (char __user *)program_name, TASK_COMM_LEN);
-    if (res<=0) {
+    if (res<=0 || res >= TASK_COMM_LEN) {
         LOG(LOG_IOCTL,"SysThrot: Failed to copy program name from user space");
         kfree(user_id_ptr);
-        return res;
+        return res <= 0 ? res : -EINVAL;
     }
+    user_id_ptr[TASK_COMM_LEN - 1] = '\0';
     
     res= add_program_to_store(sysThrot_dev.store, user_id_ptr);
-    if (!res){
-        LOG(LOG_IOCTL,"SysThrot: Registered program with name %s", user_id_ptr);
-        return 0;
-    } else if (res == -EEXIST) {
-        LOG(LOG_IOCTL,"SysThrot: Program with name %s is already registered", user_id_ptr);
-        kfree(user_id_ptr);
-    }else{
-        LOG(LOG_IOCTL,"SysThrot: Failed to register program with name %s (err=%d)", user_id_ptr, res);
-        kfree(user_id_ptr);
 
-    }
+    if (!res)
+        LOG(LOG_IOCTL,"SysThrot: Registered program with name %s", user_id_ptr);
+    else if (res == -EEXIST)
+        LOG(LOG_IOCTL,"SysThrot: Program with name %s is already registered", user_id_ptr);
+    else
+        LOG(LOG_IOCTL,"SysThrot: Failed to register program with name %s (err=%d)", user_id_ptr, res);
+
+    kfree(user_id_ptr);
     return res;
 }
 
@@ -165,26 +161,21 @@ int sysThrot_deregister_program(TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM program_nam
         return -ENOMEM;
     }
     int res=strncpy_from_user(user_id_ptr, (char __user *)program_name, TASK_COMM_LEN);
-    if (res<=0) {
+    if (res<=0 || res >= TASK_COMM_LEN) {
         LOG(LOG_IOCTL,"SysThrot: Failed to copy program name from user space");
         kfree(user_id_ptr);
-        return res;
+        return res <= 0 ? res : -EINVAL;
     }
+    user_id_ptr[TASK_COMM_LEN - 1] = '\0';
     
     res= remove_program_from_store(sysThrot_dev.store, user_id_ptr);
-    if (!res){
+
+    if (!res)
         LOG(LOG_IOCTL,"SysThrot: Removed program with name %s", user_id_ptr);
-        kfree(user_id_ptr);
-        return 0;
-    } else if (res == -EEXIST) {
-        LOG(LOG_IOCTL,"SysThrot: Program with name %s is not registered", user_id_ptr);
-        kfree(user_id_ptr);
-
-     }else{
+    else
         LOG(LOG_IOCTL,"SysThrot: Failed to remove program with name %s (err=%d)", user_id_ptr, res);
-        kfree(user_id_ptr);
 
-    }
+    kfree(user_id_ptr);
     return res;
 }
 

@@ -9,11 +9,9 @@ spinlock_t junk_lock;
 
 spinlock_t queue_lock;
 
-int epoche_max_elemesnts = 1;
 int current_in_queue = 0;
 
 int init_queue(void) {
-    epoche_max_elemesnts = sysThrot_dev.max_syscalls_for_epoch;
     queue_cache = kmem_cache_create("queue_cache",
                                     sizeof(struct _queue_elem),
                                     0, 

@@ -12,7 +12,5 @@ void inline sysThrot_log(const char *fmt, ...) {
     va_start(args, fmt);
     vsnprintf(kfmt, sizeof(kfmt), fmt, args);
     va_end(args);
-    printk(kfmt);
-    }
-
-   
+    printk("%s", kfmt);
+}

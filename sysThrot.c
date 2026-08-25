@@ -58,7 +58,7 @@ void sysThrot_cleanup(void);
 
 void timer_callback(struct timer_list *timer);
 inline int check_if_registered(void);
-void stub(struct pt_regs *regs);
+int stub(struct pt_regs *regs);
 int installProbe(int syscall_id);
 int removeProbe(int syscall_id);
 
@@ -66,12 +66,10 @@ int removeProbe(int syscall_id);
 
 extern void stub_trampoline(void);
 
-static const char *syscall_symbols[];//??
-
 
 static atomic_t dev_available = ATOMIC_INIT(1); //For now only one user at time can open the device, but it should be enough for our use case, if needed it can be easily changed to allow more concurrent users
 #define MAX_STORE_USERS    256
-#define MAX_STORE_PROGRAMS 64
+static DEFINE_MUTEX(text_patch_lock);
 
 static ssize_t sysThrot_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
 {
@@ -82,6 +80,9 @@ static ssize_t sysThrot_read(struct file *file, char __user *ubuf, size_t count,
     int   len = 0;
     const int buf_size = PAGE_SIZE * 4;
     ssize_t ret;
+
+    if (__kuid_val(current_uid()) != 0)
+        return -EPERM;
 
     buf = kmalloc(buf_size, GFP_KERNEL);
     if (!buf)
@@ -99,7 +100,7 @@ static ssize_t sysThrot_read(struct file *file, char __user *ubuf, size_t count,
 
     scnprintf(buf + len, buf_size - len, "=== Syscall Throttling Module Status ===\n");
     len += scnprintf(buf + len, buf_size - len, "Throttling is %s\n", sysThrot_dev.working ? "ON" : "OFF");
-    len += scnprintf(buf + len, buf_size - len, "Max syscalls per epoch: %lu\n", sysThrot_dev.max_syscalls_for_epoch);
+    len += scnprintf(buf + len, buf_size - len, "Max syscalls per epoch: %d\n", sysThrot_dev.max_syscalls_for_epoch);
 
 
     get_all_users_from_store(sysThrot_dev.store, users, &num_users);
@@ -114,7 +115,7 @@ static ssize_t sysThrot_read(struct file *file, char __user *ubuf, size_t count,
 
     len += scnprintf(buf + len, buf_size - len, "\n=== Monitored Syscalls ===\n");
     for (int i = 0; i < SUPPORTED_SYSCALLS; i++) {
-        if (sysThrot_dev.syscall_presence_bitmap[i / 8] & (1 << (i % 8)))
+        if ((sysThrot_dev.syscall_presence_bitmap[i / 8] & (1 << (i % 8))) && syscall_symbols[i])
             len += scnprintf(buf + len, buf_size - len, "  [%d] %s\n", i, syscall_symbols[i]);
     }
 
@@ -189,7 +190,7 @@ inline int check_if_registered(void){
 /*
     Stats could be handled in a better way, but for now i dont care, ask professor if needed, performance and concurrency is not a priority.
 */
-void stub(struct pt_regs *regs) {
+int stub(struct pt_regs *regs) {
     atomic_inc(&sysThrot_dev.critical.threads_in_stub);
     if(sysThrot_dev.working==0) {
        goto global_end;
@@ -205,15 +206,28 @@ void stub(struct pt_regs *regs) {
         goto end;
     }
     ktime_t clock_in = ktime_to_ns(ktime_get());
-    
-    // La concorenza della coda é gestita dal codice della coda stessa, ritorna solo la condizione del wakeup
+
     int *wakeup_flag = add_to_queue();
-    // TODO: I dont think the thundering herd effect is solved in this case,  waking up all threads on wake_up call. Maybe it's better to find another solution
-    int result = wait_event_interruptible(wait_q, *wakeup_flag == 1 || sysThrot_dev.working == 0);
-    set_exited_flag(wakeup_flag);
+
+    int result;
+    if (wakeup_flag) {
+        result = wait_event_interruptible(wait_q,
+            ({ sysThrot_add_ctx_switch(regs->orig_ax); *wakeup_flag == 1 || sysThrot_dev.working == 0; }));
+        set_exited_flag(wakeup_flag);
+    } else {
+        wait_event(wait_q,
+            ({ sysThrot_add_ctx_switch(regs->orig_ax);
+               atomic_read(&sysThrot_dev.critical.current_epoch_tokens) > 0 || sysThrot_dev.working == 0; }));
+        if (sysThrot_dev.working)
+            atomic_dec(&sysThrot_dev.critical.current_epoch_tokens);
+        result = 0;
+    }
     if (result == -ERESTARTSYS) {
-        LOG(LOG_STUB,"Thread interrupted by signal while waiting in queue");
-        goto end;
+        LOG(LOG_STUB,"Thread interrupted by signal while waiting in queue, failing the syscall");
+        regs->ax = -EAGAIN;
+        atomic_dec(&sysThrot_dev.critical.threads_in_module);
+        atomic_dec(&sysThrot_dev.critical.threads_in_stub);
+        return -EAGAIN;
     }
     ktime_t clock_out = ktime_to_ns(ktime_get());
     unsigned long delay_ns = clock_out - clock_in;
@@ -224,17 +238,18 @@ void stub(struct pt_regs *regs) {
     atomic_dec(&sysThrot_dev.critical.threads_in_module);
     global_end:
     atomic_dec(&sysThrot_dev.critical.threads_in_stub);
-    return;
-    
+    return 0;
 }
 
 
 
 // its neceessary to save all registers that can get dirty, if not it crashes the whole kernel. To test it just eliminate the pushe and pop, and register read, it instantly corrupts
+// if stub returns non-zero, the syscall body is skipped and the error is returned to userspace instead (rax + dropping the wrapper-body return address)
 asm(
 ".global stub_trampoline\n"
 "stub_trampoline:\n"
-"    pushq %rax\n" 
+"    pushq %rbx\n"
+"    pushq %rax\n"
 "    pushq %rdi\n"
 "    pushq %rsi\n"
 "    pushq %rdx\n"
@@ -243,8 +258,9 @@ asm(
 "    pushq %r10\n"
 "    pushq %r9\n"
 "    pushq %r8\n"
-"    call stub\n"  
-"    popq %r8\n"  
+"    call stub\n"
+"    movq %rax, %rbx\n"
+"    popq %r8\n"
 "    popq %r9\n"
 "    popq %r10\n"
 "    popq %r11\n"
@@ -253,8 +269,16 @@ asm(
 "    popq %rsi\n"
 "    popq %rdi\n"
 "    popq %rax\n"
-"    ret\n"        
-)
+"    testq %rbx, %rbx\n"
+"    jz 1f\n"
+"    movq %rbx, %rax\n"
+"    popq %rbx\n"
+"    addq $8, %rsp\n"
+"    ret\n"
+"1:\n"
+"    popq %rbx\n"
+"    ret\n"
+);
 
 extern void stub_trampoline(void);
 
@@ -272,7 +296,7 @@ int installProbe(int syscall_id){
         goto alredy_probed;
     
     
-    struct kprobe kp;
+    struct kprobe kp = {0};
     unsigned long addr_sys;
     kp.symbol_name = syscall_symbols[syscall_id];
     
@@ -294,17 +318,18 @@ int installProbe(int syscall_id){
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
         LOG(LOG_CORE,"Syscall (ID %d: %s) is already probed at address 0x%lx for registration", syscall_id, syscall_symbols[syscall_id], addr_sys);
     end:
-        int INTS_LEN=5;
-        char call_instruction[INTS_LEN];
+        char call_instruction[5] = {0};
         call_instruction[0]=0xE8; // opcode for CALL rel32
-        int offset = (unsigned long)stub_trampoline - addr_sys - INTS_LEN;
+        int offset = (unsigned long)stub_trampoline - addr_sys - sizeof(call_instruction);
         memcpy(call_instruction + 1, &offset, sizeof(int));
         unsigned long cr0, cr4;
+        mutex_lock(&text_patch_lock);
         preempt_disable();
         being_sys_call_hacking(&cr0, &cr4);
-        memcpy((void *)addr_sys, call_instruction, INTS_LEN);
+        memcpy((void *)addr_sys, call_instruction, sizeof(call_instruction));
         end_sys_call_hacking(cr0, cr4);
         preempt_enable();
+        mutex_unlock(&text_patch_lock);
         sysThrot_dev.syscall_presence_bitmap[syscall_id/8] |= (1 << (syscall_id % 8));
         return 1;
 }
@@ -321,7 +346,7 @@ int removeProbe(int syscall_id){
     if (sysThrot_dev.syscall_addresses[syscall_id] !=  0)
         goto alredy_probed;
 
-    struct kprobe kp;
+    struct kprobe kp = {0};
     unsigned long addr_sys;
     kp.symbol_name = syscall_symbols[syscall_id];
     int result = register_kprobe(&kp);
@@ -338,19 +363,20 @@ int removeProbe(int syscall_id){
         addr_sys = sysThrot_dev.syscall_addresses[syscall_id];
     end:
         kp.addr= 0;
-        int INTS_LEN=5;
-        char call_instruction[INTS_LEN];
+        char call_instruction[5] = {0};
         call_instruction[0]=0x0f; // putting multi NOP, putting 5 normale nops sometimes trigger some strange error's with ftrace, TODO check normal NOP.
         call_instruction[1]=0x1f;
         call_instruction[2]=0x44;
         call_instruction[3]=0x00;
         call_instruction[4]=0x00;
         unsigned long cr0, cr4;
+        mutex_lock(&text_patch_lock);
         preempt_disable();
         being_sys_call_hacking(&cr0, &cr4);
-        memcpy((void *)addr_sys, call_instruction, INTS_LEN);
+        memcpy((void *)addr_sys, call_instruction, sizeof(call_instruction));
         end_sys_call_hacking(cr0, cr4);
         preempt_enable();
+        mutex_unlock(&text_patch_lock);
         sysThrot_dev.syscall_presence_bitmap[syscall_id/8] &= ~(1 << (syscall_id % 8));
         return 1;
 }   
@@ -367,28 +393,29 @@ int device_driver_init(void){
         LOG(LOG_CORE,"%s: Failed to allocate a major number\n", MODNAME);
         return result;
     }
-    sysThrot_dev.device_class=class_create(DEVICE_NAME);
-    if(IS_ERR(sysThrot_dev.device_class)){
-        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        LOG(LOG_CORE,"%s: Failed to create device class\n", MODNAME);
-        return PTR_ERR(sysThrot_dev.device_class);
-    }
-    if(device_create(sysThrot_dev.device_class, NULL, MKDEV(major_number, minor_number), NULL, DEVICE_NAME) == NULL){
-        class_destroy(sysThrot_dev.device_class);
-        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
-        LOG(LOG_CORE,"%s: Failed to create device\n", MODNAME);
-        return -1;
-    }
     cdev_init(&sysThrot_dev.cdev, &sysThrot_dev.fops);
     sysThrot_dev.cdev.owner = THIS_MODULE;
     result = cdev_add(&sysThrot_dev.cdev, MKDEV(major_number, minor_number), 1);
     if (result < 0) {
-        device_destroy(sysThrot_dev.device_class, MKDEV(major_number, minor_number));
-        class_destroy(sysThrot_dev.device_class);
         unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
         LOG(LOG_CORE,"%s: Failed to add cdev\n", MODNAME);
+        return result;
     }
-    return result;
+    sysThrot_dev.device_class=class_create(DEVICE_NAME);
+    if(IS_ERR(sysThrot_dev.device_class)){
+        cdev_del(&sysThrot_dev.cdev);
+        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
+        LOG(LOG_CORE,"%s: Failed to create device class\n", MODNAME);
+        return PTR_ERR(sysThrot_dev.device_class);
+    }
+    if(IS_ERR(device_create(sysThrot_dev.device_class, NULL, MKDEV(major_number, minor_number), NULL, DEVICE_NAME))){
+        class_destroy(sysThrot_dev.device_class);
+        cdev_del(&sysThrot_dev.cdev);
+        unregister_chrdev_region(MKDEV(major_number, minor_number), 1);
+        LOG(LOG_CORE,"%s: Failed to create device\n", MODNAME);
+        return -1;
+    }
+    return 0;
 }
 
 
@@ -423,9 +450,14 @@ int sysThrot_init(void) {
     LOG(LOG_CORE,"%ld concurrent calls allowed", max_calls_monitor);
     init_sysThrot_store(&sysThrot_dev.store);
     ret = device_driver_init();
-    sysThrot_statmonitor_init();
     if (ret < 0) {
         LOG(LOG_CORE,"%s: device driver init failed\n",MODNAME);
+        return ret;
+    }
+    ret = sysThrot_statmonitor_init();
+    if (ret < 0) {
+        device_driver_cleanup();
+        LOG(LOG_CORE,"%s: statmonitor init failed\n",MODNAME);
         return ret;
     }
     sysThrot_dev.working=0;
@@ -435,6 +467,7 @@ int sysThrot_init(void) {
     atomic_set(&sysThrot_dev.critical.current_epoch_tokens, 0);
     ret= sysThrot_turn_on();
     if (ret < 0) {
+        sysThrot_statmonitor_exit();
         device_driver_cleanup();
         LOG(LOG_CORE,"%s: failed to turn on throttling\n",MODNAME);
         return ret;
@@ -480,14 +513,6 @@ int sysThrot_turn_off(void){
 
 void sysThrot_cleanup(void) {
     sysThrot_turn_off();
-    int left;
-    do{
-        left=atomic_read(&sysThrot_dev.critical.threads_in_stub);
-        if(left>0){
-            LOG(LOG_CORE,"Waiting for %d threads to exit the stub before cleanup", left);
-            msleep(100); 
-        }
-    }while(left>0);
     for(int i=0;i<__NR_syscalls/8+1;i++){
         if(sysThrot_dev.syscall_presence_bitmap[i]!=0){
             for(int j=0;j<8;j++){
@@ -498,6 +523,15 @@ void sysThrot_cleanup(void) {
             }
         }
     }
+    int left;
+    do{
+        left=atomic_read(&sysThrot_dev.critical.threads_in_stub);
+        if(left>0){
+            LOG(LOG_CORE,"Waiting for %d threads to exit the stub before cleanup", left);
+            msleep(100);
+        }
+    }while(left>0);
+    synchronize_rcu();
     destroy_sysThrot_store(sysThrot_dev.store);
     device_driver_cleanup();
     sysThrot_statmonitor_exit();

@@ -1,6 +1,24 @@
+.PHONY: compile_client client systhrot register deregister stress print-openable-files
+
 compile_client: generate_syscalls_header
-	gcc -o client client.c -I./lib
+	gcc -o client client.c -I./lib -pthread
 	gcc -o systhrot systhrot.c -I./lib
+
+client: compile_client
+
+systhrot: compile_client
+
+# print each of the files the module exposes that can be opened/read
+print-openable-files:
+	@echo "=== /dev/sysThrot_dev (device, ioctl + status read) ==="
+	@cat /dev/sysThrot_dev
+	@echo ""
+	@echo "=== /proc/SYSTHROT (per-syscall stats) ==="
+	@cat /proc/SYSTHROT
+
+# one-command stress run: register, throttle, hammer, print stats, tear down
+stress: client
+	./client -t 16 -d 5 --setup --teardown
 
 register: systhrot
 	./systhrot register-user 1000

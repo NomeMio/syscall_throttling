@@ -5,6 +5,8 @@
 #include "sysThrot.h"
 #include "sysThrot_ioctl.h"
 
+#define MAX_STORE_PROGRAMS 64
+
 
 
 

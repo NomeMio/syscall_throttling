@@ -5,7 +5,6 @@
 #define sysThrot_IOC_MAGIC '-'
 
 
-static const char *syscall_symbols[];
 #define TYPE_OF_DATA_PASSED_TO_IOCTL_USER int*
 #define TYPE_OF_DATA_PASSED_TO_IOCTL_PROGRAM char *
 #define TYPE_OF_DATA_PASSED_TO_IOCTL_SYSCALL int *
@@ -25,7 +24,7 @@ static const char *syscall_symbols[];
 
 int find_syscall_id(const char* syscall_name) {
     for (int i = 0; i < SUPPORTED_SYSCALLS; i++) {
-        if (strcmp(syscall_symbols[i], syscall_name) == 0) {
+        if (syscall_symbols[i] && strcmp(syscall_symbols[i], syscall_name) == 0) {
             return i;
         }
     }

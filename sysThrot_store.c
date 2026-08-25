@@ -16,6 +16,7 @@
 
 typedef struct {
     void *table[2][TABLE_SIZE];
+    int keys[2][TABLE_SIZE];
     int occupied[2][TABLE_SIZE];
 } CuckooHash;
 
@@ -107,12 +108,14 @@ CuckooHash *clone_map(const CuckooHash *src, void *(*clone_item)(const void *ite
             dst->table[0][i] = clone_item(src->table[0][i]);
             if (!dst->table[0][i])
                 goto fail;
+            dst->keys[0][i] = src->keys[0][i];
             dst->occupied[0][i] = 1;
         }
         if (src->occupied[1][i]) {
             dst->table[1][i] = clone_item(src->table[1][i]);
             if (!dst->table[1][i])
                 goto fail;
+            dst->keys[1][i] = src->keys[1][i];
             dst->occupied[1][i] = 1;
         }
     }
@@ -162,25 +165,34 @@ int insert(CuckooHash *map, int key, void *item, int compare(const void *a, cons
         unsigned int h1 = hash1(current_key);
         if (!map->occupied[0][h1]) {
             map->table[0][h1] = current_item;
+            map->keys[0][h1] = current_key;
             map->occupied[0][h1] = 1;
             return 0;
         }
 
         void *temp = map->table[0][h1];
+        int temp_key = map->keys[0][h1];
         map->table[0][h1] = current_item;
+        map->keys[0][h1] = current_key;
         current_item = temp;
+        current_key = temp_key;
 
         unsigned int h2 = hash2(current_key);
         if (!map->occupied[1][h2]) {
             map->table[1][h2] = current_item;
+            map->keys[1][h2] = current_key;
             map->occupied[1][h2] = 1;
             return 0;
         }
 
         temp = map->table[1][h2];
+        temp_key = map->keys[1][h2];
         map->table[1][h2] = current_item;
+        map->keys[1][h2] = current_key;
         current_item = temp;
+        current_key = temp_key;
     }
+    kfree(current_item);
     return -ENOSPC;
 }
 
@@ -190,6 +202,7 @@ int remove(CuckooHash *map, int key, const void *item, int compare(const void *a
         map->occupied[0][h1] = 0;
         kfree(map->table[0][h1]);
         map->table[0][h1] = NULL;
+        map->keys[0][h1] = 0;
         return 0;
     }
 
@@ -198,6 +211,7 @@ int remove(CuckooHash *map, int key, const void *item, int compare(const void *a
         map->occupied[1][h2] = 0;
         kfree(map->table[1][h2]);
         map->table[1][h2] = NULL;
+        map->keys[1][h2] = 0;
         return 0;
     }
     return -1;
@@ -309,6 +323,13 @@ int add_user_to_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_IOCT
         return -ENOMEM;
     }
 
+    user_id = cloneUser(user_id);
+    if (!user_id) {
+        destroy_map(new_map);
+        mutex_unlock(&store->write_lock);
+        return -ENOMEM;
+    }
+
     if (insert(new_map, key, user_id, compareUser) != 0) {
         destroy_map(new_map);
         mutex_unlock(&store->write_lock);
@@ -381,6 +402,13 @@ int add_program_to_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASSED_TO_I
 
     new_map = clone_map(old_map, cloneProgram);
     if (!new_map) {
+        mutex_unlock(&store->write_lock);
+        return -ENOMEM;
+    }
+
+    program_id = cloneProgram(program_id);
+    if (!program_id) {
+        destroy_map(new_map);
         mutex_unlock(&store->write_lock);
         return -ENOMEM;
     }
@@ -468,12 +496,14 @@ int get_all_programs_from_store(struct _sysThrot_Store *store, TYPE_OF_DATA_PASS
 
     rcu_read_lock();
     map = rcu_dereference(store->syscall_program_map);
-    for (int i = 0; i < TABLE_SIZE; i++) {
+    for (int i = 0; i < TABLE_SIZE && count < MAX_STORE_PROGRAMS; i++) {
         if (map->occupied[0][i]) {
-            program_array[count++] = kstrdup((const char *)map->table[0][i], GFP_ATOMIC);
+            strscpy(program_array[count], (const char *)map->table[0][i], TASK_COMM_LEN);
+            count++;
         }
-        if (map->occupied[1][i]) {
-            program_array[count++] = kstrdup((const char *)map->table[1][i], GFP_ATOMIC);
+        if (count < MAX_STORE_PROGRAMS && map->occupied[1][i]) {
+            strscpy(program_array[count], (const char *)map->table[1][i], TASK_COMM_LEN);
+            count++;
         }
     }
     rcu_read_unlock();
