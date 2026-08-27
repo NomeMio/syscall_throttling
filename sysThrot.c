@@ -127,6 +127,15 @@ DECLARE_WAIT_QUEUE_HEAD(wait_q);
 int major_number;
 int minor_number=0;
 
+/*
+ * Number of threads currently inside the module's trampoline/stub text.
+ * Incremented by the very first instruction of stub_trampoline and decremented
+ * by the very last one, so a thread is accounted for the whole time its IP is
+ * in module text. Used by sysThrot_cleanup() to decide when it is safe to
+ * unload the module.
+ */
+atomic_t sysThrot_stub_counter = ATOMIC_INIT(0);
+
 unsigned long max_calls_monitor = 0;
 module_param(max_calls_monitor, ulong, 0660);
 
@@ -266,27 +275,30 @@ inline int check_if_registered(void){
 
 
 /*  
-    threads stub is needed to decide if the module is desmountable
-    thread in module is needed to turn off compltely the module when asked, they are separated to avoid the  need to unook the syscall each time
+    threads in module is needed to turn off completely the module when asked;
+    the counter of threads inside the trampoline/stub text (sysThrot_stub_counter)
+    is managed by the trampoline itself, so that a thread is accounted for the
+    whole time its IP is in module text.
 */
 
 /*
     Stats could be handled in a better way, but for now i dont care, ask professor if needed, performance and concurrency is not a priority.
 */
 int stub(struct pt_regs *regs) {
-    atomic_inc(&sysThrot_dev.critical.threads_in_stub);
     if(sysThrot_dev.working==0) {
-       goto global_end;
+       return 0;
     }
     atomic_inc(&sysThrot_dev.critical.threads_in_module);
     if (check_if_registered() != 1) {
-        goto end;
+        atomic_dec(&sysThrot_dev.critical.threads_in_module);
+        return 0;
     }
 
 
     int tokens_left = atomic_dec_return(&sysThrot_dev.critical.current_epoch_tokens);
     if (tokens_left >= 0) {
-        goto end;
+        atomic_dec(&sysThrot_dev.critical.threads_in_module);
+        return 0;
     }
     ktime_t clock_in = ktime_to_ns(ktime_get());
 
@@ -308,8 +320,8 @@ int stub(struct pt_regs *regs) {
     if (result == -ERESTARTSYS) {
         LOG(LOG_STUB,"Thread interrupted by signal while waiting in queue, failing the syscall");
         regs->ax = -EAGAIN;
+        sysThrot_add_aborted(regs->orig_ax);
         atomic_dec(&sysThrot_dev.critical.threads_in_module);
-        atomic_dec(&sysThrot_dev.critical.threads_in_stub);
         return -EAGAIN;
     }
     ktime_t clock_out = ktime_to_ns(ktime_get());
@@ -317,10 +329,7 @@ int stub(struct pt_regs *regs) {
     int syscall_id = regs->orig_ax;
     sysThrot_add_blocked(syscall_id, delay_ns);
     
-    end:
     atomic_dec(&sysThrot_dev.critical.threads_in_module);
-    global_end:
-    atomic_dec(&sysThrot_dev.critical.threads_in_stub);
     return 0;
 }
 
@@ -328,9 +337,19 @@ int stub(struct pt_regs *regs) {
 
 // its neceessary to save all registers that can get dirty, if not it crashes the whole kernel. To test it just eliminate the pushe and pop, and register read, it instantly corrupts
 // if stub returns non-zero, the syscall body is skipped and the error is returned to userspace instead (rax + dropping the wrapper-body return address)
+//
+// Accounting (sysThrot_stub_counter) is done directly in asm:
+//  - the "lock incl" is the very FIRST instruction: the wrapper's CALL rel32 is
+//    the instruction before it, and interrupts/preemption only happen at
+//    instruction boundaries, so a thread is accounted before any context switch
+//    is possible while its IP is in module text (closes the trampoline-entry race).
+//  - the "lock decl" is the very LAST instruction before the ret on both paths,
+//    so the unaccounted tail is a single instruction (the ret itself).
+//    maybe it can be handled for dismounting having another grace period before deallocation of the module
 asm(
 ".global stub_trampoline\n"
 "stub_trampoline:\n"
+"    lock incl sysThrot_stub_counter(%rip)\n"
 "    pushq %rbx\n"
 "    pushq %rax\n"
 "    pushq %rdi\n"
@@ -357,9 +376,11 @@ asm(
 "    movq %rbx, %rax\n"
 "    popq %rbx\n"
 "    addq $8, %rsp\n"
+"    lock decl sysThrot_stub_counter(%rip)\n"
 "    ret\n"
 "1:\n"
 "    popq %rbx\n"
+"    lock decl sysThrot_stub_counter(%rip)\n"
 "    ret\n"
 );
 
@@ -547,7 +568,7 @@ int sysThrot_init(void) {
     }
     sysThrot_dev.working=0;
     sysThrot_dev.max_syscalls_for_epoch=max_calls_monitor;
-    atomic_set(&sysThrot_dev.critical.threads_in_stub, 0);
+    atomic_set(&sysThrot_stub_counter, 0);
     atomic_set(&sysThrot_dev.critical.epoch, 0);
     atomic_set(&sysThrot_dev.critical.current_epoch_tokens, 0);
     ret= sysThrot_turn_on();
@@ -610,7 +631,7 @@ void sysThrot_cleanup(void) {
     }
     int left;
     do{
-        left=atomic_read(&sysThrot_dev.critical.threads_in_stub);
+        left=atomic_read(&sysThrot_stub_counter);
         if(left>0){
             LOG(LOG_CORE,"Waiting for %d threads to exit the stub before cleanup", left);
             msleep(100);

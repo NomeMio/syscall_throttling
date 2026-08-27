@@ -22,7 +22,6 @@
 struct sysThrot_critical
 {
     
-    atomic_t threads_in_stub;
     atomic_t threads_in_module;
     atomic_t current_epoch_tokens;
     atomic_t epoch;
