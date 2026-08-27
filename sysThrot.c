@@ -29,12 +29,92 @@
 #include "sysThrot_queue.h"
 #include "sysThrot_statmonitor.h"
 
+#include <asm/text-patching.h>
+#include <asm/sections.h>
 
 
 
+#define USE_TEXT_POKE_SINGLE 1
+#if USE_TEXT_POKE_SINGLE
+    static struct mutex *kernel_text_mutex;
+  
+    typedef void *(*smp_text_poke_single_t)(void *addr, const void *opcode, size_t len, const void *emulate);
+    static smp_text_poke_single_t smp_text_poke_single_fn;
 
+    typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
+    static unsigned long lookup_symbol(const char *name)
+    {
+        struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
+        unsigned long addr;
+        kallsyms_lookup_name_t kfn;
 
+        if (register_kprobe(&kp) < 0)
+            return 0;
+
+        kfn = (kallsyms_lookup_name_t)kp.addr;
+        unregister_kprobe(&kp);
+
+        addr = kfn(name);
+        return addr;
+    }
+    static int __init init_patch_locks(void)
+    {
+        kernel_text_mutex = (struct mutex *)lookup_symbol("text_mutex");
+        if (!kernel_text_mutex)
+            return -ENOENT;
+        return 0;
+    }
+
+    static int __init my_patch_init(void)
+    {   
+        init_patch_locks();
+        if (!kernel_text_mutex) {
+            LOG(LOG_CORE,"Failed to resolve kernel text mutex\n");
+            return -ENOENT;
+        }
+        smp_text_poke_single_fn = (smp_text_poke_single_t)lookup_symbol("smp_text_poke_single");
+        if (!smp_text_poke_single_fn) {
+            LOG(LOG_CORE,"smp_text_poke_single resolution failed\n");
+            return -ENOENT;
+        }
+        return 0;
+    }
+
+    static int apply_smp_patch(void *target_addr, const void *insn, size_t len)
+    {   
+        if (!smp_text_poke_single_fn) {
+            my_patch_init();
+        }
+        if (smp_text_poke_single_fn){
+            mutex_lock(kernel_text_mutex);
+            smp_text_poke_single_fn(target_addr, insn, len, NULL);
+            mutex_unlock(kernel_text_mutex);
+
+            return 1;
+        }
+        return -ENOENT;
+    }
+#else
+    static DEFINE_MUTEX(text_patch_lock);
+
+    static int apply_mmap_patch(void *target_addr, const void *insn, size_t len)
+    {
+        unsigned long cr0, cr4;
+        mutex_lock(&text_patch_lock);
+        preempt_disable();
+        being_sys_call_hacking(&cr0, &cr4);
+        void *result = memcpy(target_addr, insn, len);
+        end_sys_call_hacking(cr0, cr4);
+        preempt_enable();
+        mutex_unlock(&text_patch_lock);
+        if (result != target_addr) {
+            LOG(LOG_CORE,"Failed to apply mmap patch at address %p\n", target_addr);
+            return -EFAULT;
+        }
+        return 1;
+    }
+#endif
 
 
 
@@ -69,7 +149,10 @@ extern void stub_trampoline(void);
 
 static atomic_t dev_available = ATOMIC_INIT(1); //For now only one user at time can open the device, but it should be enough for our use case, if needed it can be easily changed to allow more concurrent users
 #define MAX_STORE_USERS    256
-static DEFINE_MUTEX(text_patch_lock);
+
+
+
+
 
 static ssize_t sysThrot_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
 {
@@ -322,14 +405,15 @@ int installProbe(int syscall_id){
         call_instruction[0]=0xE8; // opcode for CALL rel32
         int offset = (unsigned long)stub_trampoline - addr_sys - sizeof(call_instruction);
         memcpy(call_instruction + 1, &offset, sizeof(int));
-        unsigned long cr0, cr4;
-        mutex_lock(&text_patch_lock);
-        preempt_disable();
-        being_sys_call_hacking(&cr0, &cr4);
-        memcpy((void *)addr_sys, call_instruction, sizeof(call_instruction));
-        end_sys_call_hacking(cr0, cr4);
-        preempt_enable();
-        mutex_unlock(&text_patch_lock);
+        #if USE_TEXT_POKE_SINGLE
+            result=apply_smp_patch((void *)addr_sys, call_instruction, sizeof(call_instruction));
+        #else
+            result=apply_mmap_patch((void *)addr_sys, call_instruction, sizeof(call_instruction));
+        #endif
+        if (result < 0) {
+            LOG(LOG_CORE,"%s: Failed to patch syscall (ID %d: %s) at address 0x%lx for registration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], addr_sys, result);
+            return result;
+        }
         sysThrot_dev.syscall_presence_bitmap[syscall_id/8] |= (1 << (syscall_id % 8));
         return 1;
 }
@@ -369,14 +453,15 @@ int removeProbe(int syscall_id){
         call_instruction[2]=0x44;
         call_instruction[3]=0x00;
         call_instruction[4]=0x00;
-        unsigned long cr0, cr4;
-        mutex_lock(&text_patch_lock);
-        preempt_disable();
-        being_sys_call_hacking(&cr0, &cr4);
-        memcpy((void *)addr_sys, call_instruction, sizeof(call_instruction));
-        end_sys_call_hacking(cr0, cr4);
-        preempt_enable();
-        mutex_unlock(&text_patch_lock);
+        #if USE_TEXT_POKE_SINGLE
+            result=apply_smp_patch((void *)addr_sys, call_instruction, sizeof(call_instruction));  
+        #else
+            result=apply_mmap_patch((void *)addr_sys, call_instruction, sizeof(call_instruction));
+        #endif
+        if (result < 0) {
+            LOG(LOG_CORE,"%s: Failed to patch syscall (ID %d: %s) at address 0x%lx for deregistration, with error %d\n", MODNAME, syscall_id, syscall_symbols[syscall_id], addr_sys, result);
+            return result;
+        }
         sysThrot_dev.syscall_presence_bitmap[syscall_id/8] &= ~(1 << (syscall_id % 8));
         return 1;
 }   
