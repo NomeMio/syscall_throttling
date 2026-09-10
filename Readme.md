@@ -1,10 +1,19 @@
+Last two thing to do:
+  1. make syscall probed array a list, 0(1) access is note needed
+  2. make stat monitor mean stats only on non 0 zero stats
+
+
+
+
+
+
 # SysThrot
 
 A Linux kernel module that monitors and **throttles system calls** made by selected
 users or programs. The module hooks the chosen syscalls in the kernel text, counts how
 many times they are invoked during an **epoch** (a time window, 1 second by default),
 and **blocks** the callers that exceed the configured quota until the next epoch begins.
-
+The quota is shared beetween all registered users/syscall/programs, so if the limit is 5 calls per epoch, the first 5 calls from any combination of registered users/programs will go through, and the rest will be blocked until the next epoch.
 ---
 
 ## Table of contents
@@ -32,11 +41,12 @@ and **blocks** the callers that exceed the configured quota until the next epoch
 - Select the syscalls to throttle (add/remove at runtime).
 - Select the *entities* that are subject to throttling, by:
   - **user** (UID), and/or
-  - **program** (executable name, limited to 16 chars).
+  - **program** (executable name).
 - Configure the **maximum number of calls per epoch** (module parameter
-  `max_calls_monitor`, default `0`).
+  `max_calls_monitor`).
 - **Turn throttling on/off** at runtime without unloading the module.
 - Per-syscall **statistics** exposed through `/proc/SYSTHROT`.
+- All memberships are exposed through `/dev/sysThrot_dev`.
 - O(1) membership checks thanks to Cuckoo hash stores protected by RCU.
 - All management operations are performed through **ioctls** and are restricted to
   **root**.
@@ -93,7 +103,6 @@ with **zero overhead**. A monitored thread must still enter the stub to be check
 | `user/client.c` | Multi-threaded stress/benchmark tool |
 | `user/lib/sysThrot.h` | User-space API (ioctl wrappers) |
 | `user/lib/syscalls.h` | **Generated** copy of the syscall mapping |
-| `sys_symbols_loader.c` | Experimental helper using libseccomp to resolve syscall names |
 
 ---
 
@@ -103,9 +112,8 @@ When a syscall is registered and it is not already hooked, the module resolves i
 address and patches the beginning of its `x86_64` wrapper (`__x64_sys_*`). Hooking the
 **wrapper** (instead of the raw syscall handler) is preferred because:
 
-1. the execution context is always interruptible;
-2. the wrapper names are always present in `/proc/kallsyms`;
-3. the wrappers are always probe-able with **kprobes**.
+1. the wrapper names are always present in `/proc/kallsyms`.
+2. the wrappers are always probe-able with **kprobes**.
 
 ### Steps
 
@@ -139,8 +147,7 @@ Two patching strategies are available, selected at compile time with the
 ### Unhooking
 
 To remove a hook, the 5 bytes are restored with a multi-byte NOP
-(`0F 1F 44 00 00`) — note: the single-byte `0x90` NOPs triggered ftrace verification
-warnings on some kernels, so multi-byte NOPs are used instead.
+(`0F 1F 44 00 00`), patching with any other instruction like 5 NOPs (`90 90 90 90 90`) would lead to **undefined behavior** once the module is unloaded and reloaded because the probing system does a check for the multi-byte NOP.
 
 The resolved addresses are cached in `syscall_addresses[]` and the installed hooks are
 tracked in a **bitmap** (`syscall_presence_bitmap`). Re-arming a previously hooked
@@ -166,25 +173,6 @@ else                  → rax = error, drop the wrapper return address, ret
 Register preservation is critical: if the dirty registers are not saved/restored the
 whole kernel crashes.
 
-### Safe unload (why the trampoline can't be preempted into a "lost" state)
-
-The trampoline lives in the module's text section, so unloading while a thread is
-inside it would crash the kernel. Unloading is therefore gated on a counter
-(`sysThrot_stub_counter`) that is maintained **by the trampoline itself**:
-
-- a `lock incl` is the **very first instruction** of the trampoline. Since the
-  wrapper's `CALL rel32` is the instruction before it, and preemption only happens at
-  instruction boundaries, a thread is accounted *before* any context switch is
-  possible while its IP is in module text;
-- a `lock decl` is the **very last instruction** before the `ret` on both exit paths.
-
-Cleanup first removes all hooks (restoring the NOPs, so no new thread can enter the
-trampoline) and then spins until the counter reaches zero. The only residual window is
-the single `ret` instruction after the decrement; on non-preemptible
-(`PREEMPT_VOLUNTARY`/`PREEMPT_NONE`) kernels it cannot be preempted, and on fully
-preemptible kernels the remaining teardown (RCU grace period, store/device cleanup)
-is orders of magnitude longer than that one instruction.
-
 ---
 
 ## Throttling logic
@@ -202,8 +190,9 @@ the thread in `sysThrot_stub_counter`, see above):
    - `>= 0` → allowed to run;
    - `< 0` → quota exceeded, the thread is **blocked**.
 5. **Blocking** — the thread is added to the FIFO wait queue and sleeps until the next
-   epoch (or until the monitor is turned off). If it wakes up because of a **signal or
-   interrupt**, the syscall is aborted and `-EAGAIN` is returned to userspace.
+  epoch (or until the monitor is turned off). If queue-entry memory allocation fails,
+  or if the thread wakes up because of a **signal or interrupt**, the syscall is
+  aborted and `-EAGAIN` is returned to userspace.
 6. When a blocked thread is finally allowed to run, its blocking time is recorded in
    the statistics.
 
@@ -218,7 +207,7 @@ the thread in `sysThrot_stub_counter`, see above):
 └──────┬──────┘     └────────────────┘     │ wait next epoch│
        │no                                 └───────────────┘
        ▼
-  return -EAGAIN (syscall skipped)  if woken by signal
+  return -EAGAIN (syscall skipped)  if allocation fails or woken by signal
 ```
 
 ---
@@ -283,7 +272,8 @@ Every time a syscall is blocked, the monitor records:
 
 - blocked calls (cumulative and per epoch);
 - mean and **peak** delay, with the **PID / UID / command** that suffered the peak;
-- waits **aborted** by a signal/interrupt (those that return `-EAGAIN`);
+- waits **aborted** by a signal/interrupt or queue allocation failure (those that return
+  `-EAGAIN`);
 - wait-condition evaluations (context switches while waiting), accumulated and peaked
   per epoch.
 

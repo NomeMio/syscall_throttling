@@ -36,7 +36,7 @@ struct sysThrot_driver
     int max_syscalls_for_epoch; 
     char syscall_presence_bitmap[__NR_syscalls/8+1];
     int bitmap_size;
-    unsigned long syscall_addresses[SUPPORTED_SYSCALLS];
+    unsigned long syscall_addresses[SUPPORTED_SYSCALLS];// make it to. list
     struct file_operations fops;
     struct cdev cdev;
     struct class *device_class;

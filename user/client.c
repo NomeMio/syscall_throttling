@@ -10,11 +10,14 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <signal.h>
 #include "./lib/sysThrot.h"
 
 #define DEFAULT_THREADS 16
 #define DEFAULT_DURATION 5
+#define DEFAULT_KILL_AFTER 0
 #define MONITOR_PATH "/proc/SYSTHROT"
+#define KILL_SIGNAL SIGTERM
 
 #define MAX_SYSCALLS 16
 #define MAX_PROGRAMS 8
@@ -35,19 +38,20 @@ struct worker_arg {
 	atomic_long eagain;
 };
 
-static atomic_int stop_flag;
+static void on_kill_signal(int sig) {
+	(void)sig;
+}
 
 static void *worker_job(void *arg) {
 	struct worker_arg *a = (struct worker_arg *)arg;
 	if (a->comm)
 		prctl(PR_SET_NAME, a->comm, 0, 0, 0);
-	while (!atomic_load(&stop_flag)) {
-		long r = syscall(a->syscall_nr);
-		if (r == -1 && errno == EAGAIN)
-			atomic_fetch_add(&a->eagain, 1);
-		else
-			atomic_fetch_add(&a->ok, 1);
-	}
+	int r = syscall(a->syscall_nr);
+	//printf("Thread %s (syscall %d) returned %ld\n", a->comm, a->syscall_nr, r);
+	if (r == -EAGAIN)
+		atomic_fetch_add(&a->eagain, 1);
+	else
+		atomic_fetch_add(&a->ok, 1);
 	return NULL;
 }
 
@@ -123,31 +127,40 @@ static int split_list(const char *list, const char *out[], int max) {
 
 static void usage(const char *prog) {
 	fprintf(stderr,
-		"Usage: %s [-t NTHREADS] [-d SECONDS] [-s SYSCALLS] [-p PROGRAMS] [--setup] [--teardown]\n"
+		"Usage: %s [-t NTHREADS] [-d SECONDS] [-k SECONDS] [-s SYSCALLS] [-p PROGRAMS] [--setup] [--teardown]\n"
 		"\n"
-		"  -t NTHREADS   number of worker threads (default %d)\n"
+		"  -t NTHREADS   worker threads spawned every second (default %d)\n"
 		"  -d SECONDS    duration of the run (default %d)\n"
+		"  -k SECONDS    after SECONDS send %s to all running threads (default %d = off)\n"
 		"  -s SYSCALLS   comma-separated syscall symbol names to hammer\n"
 		"                (default: %s)\n"
 		"  -p PROGRAMS   comma-separated program names workers impersonate\n"
 		"                (default: %s,...) names are limited to 15 chars\n"
 		"  --setup       register user, programs and syscalls, then turn throttling on\n"
 		"  --teardown    turn throttling off and deregister everything again\n",
-		prog, DEFAULT_THREADS, DEFAULT_DURATION, default_syscalls[0], default_programs[0]);
+		prog, DEFAULT_THREADS, DEFAULT_DURATION, "SIGTERM", DEFAULT_KILL_AFTER,
+		default_syscalls[0], default_programs[0]);
 }
 
 int main(int argc, char **argv) {
 	int threads = DEFAULT_THREADS;
 	int duration = DEFAULT_DURATION;
+	int kill_after = DEFAULT_KILL_AFTER;
 	int do_setup = 0, do_teardown = 0;
 
 	const char *syscall_list = NULL;
 	const char *program_list = NULL;
+	if (argc==1){
+		usage(argv[0]);
+		return EXIT_FAILURE;
+	}
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
 			threads = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
 			duration = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
+			kill_after = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
 			syscall_list = argv[++i];
 		} else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
@@ -162,7 +175,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	if (threads <= 0 || duration <= 0) {
+	if (threads <= 0 || duration <= 0 || kill_after < 0) {
 		usage(argv[0]);
 		return EXIT_FAILURE;
 	}
@@ -196,23 +209,28 @@ int main(int argc, char **argv) {
 	if (do_setup && setup_throttle(programs, nprog, syscalls, nsys) != 0)
 		return EXIT_FAILURE;
 
-	struct worker_arg *args = calloc(threads, sizeof(struct worker_arg));
-	pthread_t *tids = calloc(threads, sizeof(pthread_t));
+	int nslots = threads * duration;
+	struct worker_arg *args = calloc(nslots, sizeof(struct worker_arg));
+	pthread_t *tids = calloc(nslots, sizeof(pthread_t));
 	if (!args || !tids) {
 		perror("calloc");
 		return EXIT_FAILURE;
 	}
 
-	atomic_store(&stop_flag, 0);
-	for (int i = 0; i < threads; i++) {
+	for (int i = 0; i < nslots; i++) {
 		args[i].syscall_nr = nr[i % nsys];
 		args[i].comm = programs[i % nprog];
 		atomic_store(&args[i].ok, 0);
 		atomic_store(&args[i].eagain, 0);
 	}
 
-	printf("PID: %d, hammering %d syscalls with %d threads (%d program names) for %d s\n",
-	       getpid(), nsys, threads, nprog, duration);
+	printf("PID: %d, hammering %d syscalls (%d program names)\n",
+	       getpid(), nsys, nprog);
+	printf("Spawn profile: %d thread(s) every second for %d s (%d total threads)\n",
+	       threads, duration, nslots);
+	if (kill_after > 0)
+		printf("Kill profile:  %s sent to all running threads after %d s\n",
+		       "SIGTERM", kill_after);
 	printf("Syscalls:");
 	for (int i = 0; i < nsys; i++)
 		printf(" %s", syscalls[i]);
@@ -221,27 +239,55 @@ int main(int argc, char **argv) {
 		printf(" %s", programs[i]);
 	printf("\n");
 
-	for (int i = 0; i < threads; i++) {
-		if (pthread_create(&tids[i], NULL, worker_job, &args[i]) != 0) {
-			perror("pthread_create");
-			atomic_store(&stop_flag, 1);
-			for (int j = 0; j < i; j++)
-				pthread_join(tids[j], NULL);
-			return EXIT_FAILURE;
-		}
+	if (kill_after > 0) {
+		struct sigaction sa;
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = on_kill_signal;
+		sigemptyset(&sa.sa_mask);
+		sigaction(KILL_SIGNAL, &sa, NULL);
 	}
 
 	long start = now_ms();
-	while (now_ms() - start < duration * 1000L)
-		usleep(10000);
-	atomic_store(&stop_flag, 1);
+	long end = start + duration * 1000L;
+	long next_spawn = start;
+	long kill_at = (kill_after > 0) ? start + kill_after * 1000L : -1;
+	int spawned = 0, killed = 0;
 
-	for (int i = 0; i < threads; i++)
+	while (1) {
+		long now = now_ms();
+		if (now >= end && (kill_after <= 0 || killed))
+			break;
+		if (now < end && now >= next_spawn) {
+			for (int j = 0; j < threads && spawned < nslots; j++, spawned++) {
+				if (pthread_create(&tids[spawned], NULL, worker_job,
+				                   &args[spawned]) != 0) {
+					perror("pthread_create");
+					for (int k = 0; k < spawned; k++)
+						pthread_join(tids[k], NULL);
+					free(tids);
+					free(args);
+					return EXIT_FAILURE;
+				}
+			}
+			next_spawn += 1000;
+		}
+		if (!killed && kill_at > 0 && now >= kill_at) {
+			printf("Sending %s to %d running thread(s)\n", "SIGTERM", spawned);
+			for (int t = 0; t < spawned; t++)
+				if (pthread_kill(tids[t], KILL_SIGNAL) != 0 &&
+				    errno != ESRCH)
+					perror("pthread_kill");
+			killed = 1;
+		}
+		usleep(10000);
+	}
+
+	for (int i = 0; i < spawned; i++)
 		pthread_join(tids[i], NULL);
 
 	long elapsed = now_ms() - start;
 	long tot_ok = 0, tot_eg = 0;
-	for (int i = 0; i < threads; i++) {
+	for (int i = 0; i < spawned; i++) {
 		tot_ok += atomic_load(&args[i].ok);
 		tot_eg += atomic_load(&args[i].eagain);
 	}
@@ -256,7 +302,7 @@ int main(int argc, char **argv) {
 	printf("\nPer-syscall (OK / EAGAIN):\n");
 	for (int i = 0; i < nsys; i++) {
 		long ok = 0, eg = 0;
-		for (int t = 0; t < threads; t++)
+		for (int t = 0; t < spawned; t++)
 			if (args[t].syscall_nr == nr[i]) {
 				ok += atomic_load(&args[t].ok);
 				eg += atomic_load(&args[t].eagain);

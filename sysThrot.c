@@ -273,17 +273,6 @@ inline int check_if_registered(void){
 
 
 
-
-/*  
-    threads in module is needed to turn off completely the module when asked;
-    the counter of threads inside the trampoline/stub text (sysThrot_stub_counter)
-    is managed by the trampoline itself, so that a thread is accounted for the
-    whole time its IP is in module text.
-*/
-
-/*
-    Stats could be handled in a better way, but for now i dont care, ask professor if needed, performance and concurrency is not a priority.
-*/
 int stub(struct pt_regs *regs) {
     if(sysThrot_dev.working==0) {
        return 0;
@@ -307,15 +296,19 @@ int stub(struct pt_regs *regs) {
     int result;
     if (wakeup_flag) {
         result = wait_event_interruptible(wait_q,
-            ({ sysThrot_add_ctx_switch(regs->orig_ax); *wakeup_flag == 1 || sysThrot_dev.working == 0; }));
-        set_exited_flag(wakeup_flag);
+            ({ sysThrot_add_ctx_switch(regs->orig_ax); sysThrot_dev.working == 0 || *wakeup_flag == 1; }));
+        if(sysThrot_dev.working){ 
+            set_exited_flag(wakeup_flag);
+        }else{
+            atomic_dec(&sysThrot_dev.critical.threads_in_module);
+            return 0;
+        }
     } else {
-        wait_event(wait_q,
-            ({ sysThrot_add_ctx_switch(regs->orig_ax);
-               atomic_read(&sysThrot_dev.critical.current_epoch_tokens) > 0 || sysThrot_dev.working == 0; }));
-        if (sysThrot_dev.working)
-            atomic_dec(&sysThrot_dev.critical.current_epoch_tokens);
-        result = 0;
+        LOG(LOG_STUB,"Error with slab allocation");
+        regs->ax = -EAGAIN;
+        sysThrot_add_aborted(regs->orig_ax);
+        atomic_dec(&sysThrot_dev.critical.threads_in_module);
+        return -EAGAIN;
     }
     if (result == -ERESTARTSYS) {
         LOG(LOG_STUB,"Thread interrupted by signal while waiting in queue, failing the syscall");

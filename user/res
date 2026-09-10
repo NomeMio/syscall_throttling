@@ -1,0 +1,103 @@
+PID: 6179, hammering 1 syscalls (1 program names)
+Spawn profile: 40 thread(s) every second for 2 s (80 total threads)
+Kill profile:  SIGTERM sent to all running threads after 2 s
+Syscalls: __x64_sys_getpid
+Programs: client
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Thread client (syscall 39) returned 6179
+Sending SIGTERM to 80 running thread(s)
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+Thread client (syscall 39) returned 4294967295
+
+--- Results ---
+Elapsed:      2042 ms
+OK calls:     14
+EAGAIN calls: 66
+Throughput:   39 calls/s (32 throttled/s)
+
+Per-syscall (OK / EAGAIN):
+  __x64_sys_getpid       14 / 66
+
+--- Monitor dump ---
+=== Syscall Throttling Statistics ===
+  epochs elapsed: 168   window: 20 epochs   epoch duration: 1000 ms
+    NR SYSCALL                     TOTAL     LAST  AVG/EPOCH  MEAN(ms)  PEAK(ms)  ABORT CTX/EPOCH  CTX PEAK  PEAK PROC (PID:UID)
+  -------------------------------------------------------------------------------------------------
+    39 __x64_sys_getpid               17        2          0   1039.69   1838.73    132         4       263  client (6069:0)
+

@@ -1,12 +1,12 @@
 #include <linux/slab.h>
+#include <linux/list.h>
+#include <linux/spinlock.h>
 #include "sysThrot_queue.h"
-
 
 LIST_HEAD(global_queue);
 static struct kmem_cache *queue_cache;
 LIST_HEAD(junk_list);
 spinlock_t junk_lock;
-
 spinlock_t queue_lock;
 
 int current_in_queue = 0;
@@ -28,15 +28,22 @@ int init_queue(void) {
 int* add_to_queue(void) {
     struct _queue_elem *data = kmem_cache_alloc(queue_cache, GFP_KERNEL);
     if (!data)
-        return 0;
-    data->exited=0;
+        return NULL;
+
+    data->exited = 0;
     data->wake_up_flag = 0;
-    current_in_queue++;
 
     spin_lock(&queue_lock);
+    if (sysThrot_dev.working == 0) {
+        spin_unlock(&queue_lock);
+        kmem_cache_free(queue_cache, data);
+        return NULL;
+    }
+
+    current_in_queue++;
     list_add_tail(&data->node, &global_queue);
     spin_unlock(&queue_lock);
-    LOG(LOG_QUEUE, "Added thread to queue, current queue size: %d", current_in_queue);
+
     return &data->wake_up_flag;
 }
 
@@ -47,20 +54,18 @@ int unqueue(int n) {
     spin_lock(&queue_lock);
     list_for_each_entry_safe(data, tmp, &global_queue, node) {
         if (data->exited) {
-            list_del(&data->node);
-            kmem_cache_free(queue_cache, data);
+            spin_lock(&junk_lock);
+            list_move_tail(&data->node, &junk_list);
+            spin_unlock(&junk_lock);
             current_in_queue--;
             continue;
         }
         if (missing <= 0)
             break;
-        data->wake_up_flag = 1; 
-        //move to junk queue
+        data->wake_up_flag = 1;
         spin_lock(&junk_lock);
         list_move_tail(&data->node, &junk_list);
         spin_unlock(&junk_lock);
-        //list_del(&data->node);
-        //kmem_cache_free(queue_cache, data);
         missing--;
     }
     current_in_queue -= (n - missing);
@@ -77,39 +82,37 @@ void free_junk(void) {
             kmem_cache_free(queue_cache, data);
         }
     }
-
     spin_unlock(&junk_lock);
 }
 
 void set_exited_flag(int *wakeup_flag) {
-    struct _queue_elem *data= container_of(wakeup_flag, struct _queue_elem, wake_up_flag);
+    struct _queue_elem *data = container_of(wakeup_flag, struct _queue_elem, wake_up_flag);
     data->exited = 1;
 }
 
 int wake_up_queue(void) {
-    struct _queue_elem *data, *tmp;
     int count = 0;
+    struct _queue_elem *data;
 
     spin_lock(&queue_lock);
-    list_for_each_entry_safe(data, tmp, &global_queue, node) {
-        data->wake_up_flag = 1; 
+    spin_lock(&junk_lock);
+
+    list_for_each_entry(data, &global_queue, node) {
+        data->wake_up_flag = 1;
         count++;
     }
+    list_splice_tail_init(&global_queue, &junk_list);
+    current_in_queue = 0;
+
+    spin_unlock(&junk_lock);
     spin_unlock(&queue_lock);
     return count;
 }
 
 int destroy_queue(void) {
-    struct _queue_elem *data, *tmp;
-    int count = 0;
-    spin_lock(&queue_lock);
-    list_for_each_entry_safe(data, tmp, &global_queue, node) {
-        list_del(&data->node);
-        kmem_cache_free(queue_cache, data);
-        count++;
-    }
-    spin_unlock(&queue_lock);
+    struct _queue_elem *data, *tmp;   
+    //At this point, wake_up_queue() should have been called, so the global_queue should be empty, and all the threads outisde the module.
     free_junk();
     kmem_cache_destroy(queue_cache);
-    return count;
+    return 0;
 }
