@@ -1,13 +1,11 @@
-Last two thing to do:
-  1. make syscall probed array a list, 0(1) access is note needed
-  2. make stat monitor mean stats only on non 0 zero stats
-
-
-
-
 
 
 # SysThrot
+
+# Requirements : 
+The module was  tested on 6.18.18-0 lts alpine and debian 13 with kernel 6.12 lts, but should work on any x86_64 kernel >= 6.4, this is due module some module initialization and cleanup functions that were changed, and due some timer functions names that were changed.
+---
+
 
 A Linux kernel module that monitors and **throttles system calls** made by selected
 users or programs. The module hooks the chosen syscalls in the kernel text, counts how
@@ -77,8 +75,7 @@ The quota is shared beetween all registered users/syscall/programs, so if the li
 ```
 
 Only syscalls that are explicitly registered are patched, so every other syscall runs
-with **zero overhead**. A monitored thread must still enter the stub to be checked, so a
-*small* per-call overhead exists for those syscalls, even for unmonitored callers.
+with **zero overhead**. A *small* per-call overhead exists for monitored syscalls, even for unmonitored callers.
 
 ---
 
@@ -361,9 +358,6 @@ At build time the Makefile (`load_sys_calls` + `generate_syscalls_header`) produ
 The kernel module uses this table to know which symbol to kprobe for a given syscall
 number; the user-space tools use it to translate a symbol name into a syscall number.
 
-> Note: if `/proc/kallsyms` hides symbol addresses (`kptr_restrict`), generate the
-> table as root or adjust `kptr_restrict`.
-
 ---
 
 ## User-space tools
@@ -391,7 +385,7 @@ make            # builds ./systhrot and ./client
 ### `client` — stress/benchmark tool
 
 ```sh
-./client -t 16 -d 5 --setup --teardown
+./client -t 16 -d 5 --setup --teardown -k 2
 ```
 
 Spawns `-t` worker threads that hammer the selected syscalls for `-d` seconds,
@@ -401,21 +395,27 @@ impersonating the configured program names, and reports:
 - aggregate throughput (calls/s, throttled/s);
 - a per-syscall `OK / EAGAIN` breakdown;
 - the `/proc/SYSTHROT` dump.
+- `-k <time>` send a kill signal to all threads after `<time>` seconds (to test signal handling).
 
 Useful flags: `-s __x64_sys_getpid,__x64_sys_getuid` to pick syscalls, `-p name1,name2`
 to pick program names, `--setup` to register everything and turn throttling on,
 `--teardown` to undo it all.
+- `-k <time>` send a kill signal to all threads after `<time>` seconds (to test signal handling).
 
-A one-command stress run is also available via `make stress` in `user/` (16 threads,
-5 s, setup + teardown).
+An example run:
 
+```sh
+./client -t 15 -d 4 -s __x64_sys_getpid -p p1 -k 5
+```
+
+Runs 15 threads every seacond each one calling one time `getpid` impersonating the program `p1`, for 4 seconds, and sends a kill signal to all threads after 5 seconds. So in total 60 calls are mande with ~25 calls that go trough and ~35 calls that are blocked and return `EAGAIN` because the limit is 5 calls per epoch.
 ---
 
 ## Known limitations
 
-- The hook works on `__x64_sys_*` wrappers only (**x86_64**).
-- Program matching is based on `comm`, which is limited to **16 characters** and can be
-  changed by the process itself (e.g. with `prctl(PR_SET_NAME)`).
-- Blocked threads are woken at most once per epoch, so worst-case latency is one epoch
-  (1 s).
-- The device allows only **one opener** at a time.
+Thera are some optimizations that can be made, expicially in the stub path, to reduce the overhead of monitored syscalls in both memory usage and concurrency performance:
+  - For memory optimizations i could remove or at least reduce the memory footprint of the array with the syscalls strings, and make the list of monitored syscalls a linked list instead of an array, so that the memory footprint is proportional to the number of monitored syscalls and not to the total number of syscalls in the kernel, and access is not O(1) but the speed is not important where its used.
+  - For concurrency, the numbers of locks could be reduced, and a lock-free queue could be implemented for the wait queue, so that the threads that are waiting for a token do not block each other when they are added to the queue.
+
+
+

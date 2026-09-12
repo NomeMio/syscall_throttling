@@ -8,9 +8,6 @@ UNISTD_64 = $(firstword $(wildcard \
 	/usr/include/asm/unistd_64.h))
 
 
-#syscall_address = $(shell cat /sys/module/the_usctm/pa0rameters/sys_call_table_address)
-
-#sys_call_table_address=$(syscall_address)
 all: generate_syscalls_header
 	@make -C /lib/modules/$(shell uname -r)/build M=$(PWD) V=1 modules > output.log 2>&1
 

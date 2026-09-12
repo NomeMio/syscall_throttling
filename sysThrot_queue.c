@@ -34,10 +34,10 @@ int* add_to_queue(void) {
     data->wake_up_flag = 0;
 
     spin_lock(&queue_lock);
-    if (sysThrot_dev.working == 0) {
+    if (sysThrot_dev.working == 0) { // this makes sure that monitor gets turned off correctly
         spin_unlock(&queue_lock);
         kmem_cache_free(queue_cache, data);
-        return NULL;
+        return (int *)1;
     }
 
     current_in_queue++;
