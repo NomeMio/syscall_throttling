@@ -3,7 +3,9 @@
 # SysThrot
 
 # Requirements : 
+
 The module was  tested on 6.18.18-0 lts alpine and debian 13 with kernel 6.12 lts, but should work on any x86_64 kernel >= 6.4, this is due module some module initialization and cleanup functions that were changed, and due some timer functions names that were changed.
+
 ---
 
 
@@ -12,6 +14,7 @@ users or programs. The module hooks the chosen syscalls in the kernel text, coun
 many times they are invoked during an **epoch** (a time window, 1 second by default),
 and **blocks** the callers that exceed the configured quota until the next epoch begins.
 The quota is shared beetween all registered users/syscall/programs, so if the limit is 5 calls per epoch, the first 5 calls from any combination of registered users/programs will go through, and the rest will be blocked until the next epoch.
+
 ---
 
 ## Table of contents
@@ -409,6 +412,7 @@ An example run:
 ```
 
 Runs 15 threads every seacond each one calling one time `getpid` impersonating the program `p1`, for 4 seconds, and sends a kill signal to all threads after 5 seconds. So in total 60 calls are mande with ~25 calls that go trough and ~35 calls that are blocked and return `EAGAIN` because the limit is 5 calls per epoch.
+
 ---
 
 ## Known limitations
